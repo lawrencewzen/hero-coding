@@ -44,7 +44,7 @@ export async function runOnce(storyPath: string): Promise<RunStats> {
   const stats: RunStats = {
     storyId: sid,
     storyTitle: story.frontmatter.title,
-    worker: { baseUrl: workerConfig.provider, model: workerConfig.model },
+    worker: { provider: workerConfig.provider, model: workerConfig.model },
     judge: { baseUrl: judgeConfig.baseUrl, model: judgeConfig.model },
     startedAt,
     workerRuns: [],

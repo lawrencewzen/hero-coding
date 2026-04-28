@@ -14,6 +14,7 @@ export interface WorkerRunStats {
   tokensIn: number;
   tokensOut: number;
   exitCode: number;
+  killReason?: "loop" | "tool_cap" | "wall_timeout";
 }
 
 export interface VerdictRecord {
@@ -26,7 +27,7 @@ export interface VerdictRecord {
 export interface RunStats {
   storyId: string;
   storyTitle: string;
-  worker: { baseUrl: string; model: string };
+  worker: { provider: string; model: string };
   judge: { baseUrl: string; model: string };
   startedAt: string;
   finishedAt?: string;
