@@ -1,0 +1,27 @@
+node_modules/
+dist/
+*.log
+
+# secrets
+.env
+.env.local
+
+# runtime working dirs
+workspace/
+inbox/_processing/
+done/_archive/
+
+# stats / runs
+runs/
+
+# target-repo carries its own .git when seeded; don't commit it as nested repo
+examples/target-repo/.git/
+
+# inbox / done are runtime, the example stories live under examples/stories/
+inbox/*.md
+done/*.md
+
+# editor
+.DS_Store
+.vscode/
+.idea/
