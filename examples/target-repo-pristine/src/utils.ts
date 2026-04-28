@@ -6,31 +6,14 @@ export function formatDate(date: Date): string {
 }
 
 export function parseRange(input: string): number[] {
-  if (input.length === 0) {
-    throw new Error("empty range input");
-  }
-
-  const parts = input.split("-");
-  if (parts.length !== 2) {
+  const parts = input.split("-").map((s) => Number.parseInt(s, 10));
+  const a = parts[0];
+  const b = parts[1];
+  if (a === undefined || b === undefined || Number.isNaN(a) || Number.isNaN(b)) {
     throw new Error(`invalid range: ${input}`);
   }
-
-  const [startPart, endPart] = parts;
-  const start = Number.parseInt(startPart, 10);
-  const end = Number.parseInt(endPart, 10);
-
-  if (Number.isNaN(start) || Number.isNaN(end)) {
-    throw new Error(`invalid range: ${input}`);
-  }
-
-  if (start > end) {
-    throw new Error(`range start must be less than or equal to end: ${input}`);
-  }
-
   const out: number[] = [];
-  for (let i = start; i <= end; i += 1) {
-    out.push(i);
-  }
+  for (let i = a; i < b; i++) out.push(i);
   return out;
 }
 
@@ -41,5 +24,5 @@ export function formatNumber(n: number): string {
   const withCommas = intPart.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
   const fraction = abs.toString().split(".")[1];
   const body = fraction ? `${withCommas}.${fraction}` : withCommas;
-  return `${sign}${body}`;
+  return `${sign}-${body}`;
 }

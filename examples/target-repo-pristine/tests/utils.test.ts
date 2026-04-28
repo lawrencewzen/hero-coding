@@ -15,18 +15,6 @@ test("parseRange single value", () => {
   assert.deepEqual(parseRange("3-3"), [3]);
 });
 
-test("parseRange throws on empty input", () => {
-  assert.throws(() => parseRange(""), /empty/i);
-});
-
-test("parseRange throws when start is greater than end", () => {
-  assert.throws(() => parseRange("5-3"), /start.*end|end.*start/i);
-});
-
-test("parseRange throws on invalid numeric input", () => {
-  assert.throws(() => parseRange("a-b"), /invalid/i);
-});
-
 test("formatNumber positive", () => {
   assert.equal(formatNumber(1234567), "1,234,567");
 });

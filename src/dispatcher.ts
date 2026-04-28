@@ -32,6 +32,19 @@ async function countCommits(repo: string, base: string): Promise<number> {
   return Number.parseInt(out, 10);
 }
 
+async function autoRescueCommit(repo: string, round: number): Promise<boolean> {
+  // If worker left uncommitted changes, commit them so the Judge can see them.
+  const status = await git(["status", "--porcelain"], repo);
+  if (!status.trim()) return false;
+  await git(["add", "-A"], repo);
+  await git(
+    ["commit", "-m", `chore(rescue): auto-commit pending worker changes (round ${round})`],
+    repo,
+  );
+  console.log(`   ↳ auto-rescue: committed pending changes left by worker`);
+  return true;
+}
+
 export async function runOnce(storyPath: string): Promise<RunStats> {
   const story = await parseStory(storyPath);
   const sid = storyId(story);
@@ -70,6 +83,8 @@ export async function runOnce(storyPath: string): Promise<RunStats> {
     console.log(
       `   worker: ${w.wallMs}ms, ${w.toolUseTotal} tool uses, exit ${w.exitCode}`,
     );
+
+    await autoRescueCommit(targetRepo, round);
 
     const v = await runJudge({
       story,
