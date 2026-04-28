@@ -25,3 +25,5 @@ done/*.md
 .DS_Store
 .vscode/
 .idea/
+examples/target-repo/package-lock.json
+examples/target-repo/node_modules/
