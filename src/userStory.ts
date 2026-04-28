@@ -6,7 +6,10 @@ import { z } from "zod";
 const FrontmatterSchema = z.object({
   id: z.string(),
   title: z.string(),
-  created: z.string().optional(),
+  created: z
+    .union([z.string(), z.date()])
+    .transform((v) => (v instanceof Date ? v.toISOString() : v))
+    .optional(),
   priority: z.enum(["low", "normal", "high"]).default("normal"),
   max_retries: z.number().int().nonnegative().optional(),
 });

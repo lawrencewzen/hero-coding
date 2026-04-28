@@ -13,7 +13,7 @@ export function parseRange(input: string): number[] {
     throw new Error(`invalid range: ${input}`);
   }
   const out: number[] = [];
-  for (let i = a; i < b; i++) out.push(i);
+  for (let i = a; i <= b; i++) out.push(i);
   return out;
 }
 
@@ -24,5 +24,5 @@ export function formatNumber(n: number): string {
   const withCommas = intPart.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
   const fraction = abs.toString().split(".")[1];
   const body = fraction ? `${withCommas}.${fraction}` : withCommas;
-  return `${sign}-${body}`;
+  return `${sign}${body}`;
 }
