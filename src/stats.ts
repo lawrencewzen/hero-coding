@@ -27,6 +27,9 @@ export interface VerdictRecord {
 export interface RunStats {
   storyId: string;
   storyTitle: string;
+  branch: string;
+  baseRef: string;
+  worktreePath: string;
   worker: { provider: string; model: string };
   judge: { baseUrl: string; model: string };
   startedAt: string;

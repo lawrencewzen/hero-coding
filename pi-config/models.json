@@ -19,44 +19,6 @@
           "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
         }
       ]
-    },
-    "ling": {
-      "baseUrl": "https://api.ant-ling.com/v1",
-      "api": "openai-completions",
-      "apiKey": "LING_API_KEY",
-      "compat": {
-        "supportsDeveloperRole": false,
-        "supportsReasoningEffort": false
-      },
-      "models": [
-        {
-          "id": "Ling-2.6-flash",
-          "name": "Ling 2.6 Flash",
-          "reasoning": false,
-          "input": ["text"],
-          "contextWindow": 256000,
-          "maxTokens": 32000,
-          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
-        },
-        {
-          "id": "Ling-2.5-1T",
-          "name": "Ling 2.5 1T",
-          "reasoning": false,
-          "input": ["text"],
-          "contextWindow": 128000,
-          "maxTokens": 32000,
-          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
-        },
-        {
-          "id": "Ling-1T",
-          "name": "Ling 1T",
-          "reasoning": false,
-          "input": ["text"],
-          "contextWindow": 128000,
-          "maxTokens": 32000,
-          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
-        }
-      ]
     }
   }
 }

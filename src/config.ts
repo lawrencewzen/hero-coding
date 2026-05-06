@@ -17,6 +17,11 @@ export interface JudgeConfig {
   model: string;
 }
 
+export interface WorkspaceConfig {
+  repo: string;
+  baseRef: string;
+}
+
 export const workerConfig: WorkerConfig = {
   provider: required("WORKER_PROVIDER"),
   model: required("WORKER_MODEL"),
@@ -28,5 +33,10 @@ export const judgeConfig: JudgeConfig = {
   model: required("JUDGE_MODEL"),
 };
 
-export const targetRepo = required("TARGET_REPO");
+export const workspaceConfig: WorkspaceConfig = {
+  repo: required("TARGET_REPO"),
+  baseRef: process.env.TARGET_BASE_REF || "main",
+};
+
+export const targetRepo = workspaceConfig.repo;
 export const maxRetries = Number.parseInt(process.env.MAX_RETRIES ?? "3", 10);
