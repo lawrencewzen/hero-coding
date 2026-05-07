@@ -2,6 +2,13 @@ node_modules/
 dist/
 *.log
 
+# Go build artifacts
+/hero
+/bin/
+*.test
+*.out
+coverage.out
+
 # secrets
 .env
 .env.local

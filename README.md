@@ -1,128 +1,149 @@
 # hero-coding
 
+[English](./README.md) · [中文](./README.zh.md)
+
 A minimal harness for autonomous coding agents. Drop a user story in `inbox/`, get git commits out.
 
 ## Philosophy
 
 **The harness is the thinking layer. The agent is a replaceable executor.**
 
-Reasoning-heavy models aren't the only path to reliable code generation. When a non-reasoning model runs inside a harness with dispatcher, judge, and guardrails, the system as a whole becomes the "thinker" — keeping the agent focused, catching mistakes, and retrying with feedback. The intelligence lives in the loop, not in the weights.
+Reasoning lives in the loop, not in the weights. A non-reasoning model running inside a harness with dispatcher, verifier, judge, and guardrails behaves like a reasoning system as a whole — focused on the task, caught when it strays, retried with concrete feedback.
 
 ## Architecture
 
 ```
-inbox/us-001.md        # user story (markdown + frontmatter)
-      │
-      ▼
-  Dispatcher  ─── watches inbox/, creates an isolated git worktree per story
-      │
-      ▼
-   Worker     ─── coding agent (pi CLI in --mode json)
-      │           atomic git commits per change
-      ▼
-   Judge      ─── reads git log + diffs, returns {verdict, reason}
-      │
-      ├─ PASS ─→ done/us-001.md
-      └─ FAIL ─→ append reason to story, retry (up to MAX_RETRIES)
+inbox/us-001.md
+       │
+       ▼
+   Dispatcher  ── watches inbox/, creates an isolated git worktree per story
+       │
+       ▼
+   ┌── Round Loop ─────────────────────────────────┐
+   │                                               │
+   │   Worker   ── coding agent, native ReAct loop │
+   │     │        atomic git commits per change    │
+   │     ▼                                         │
+   │   Verifier ── runs the story's `verify:`      │
+   │     │        commands (tests / lint / type)   │
+   │     ▼                                         │
+   │   Judge    ── reads story + verifier output   │
+   │              + git diff, returns PASS / FAIL  │
+   │                                               │
+   └─────────────────┬─────────────────────────────┘
+                     │
+              ┌──────┴──────┐
+            PASS           FAIL
+              │             │
+              ▼             ▼
+          done/        feedback appended → next round
 ```
 
-Dispatcher / Worker / Judge are **stateless one-shot processes**. Each story runs in its own git worktree branched from `TARGET_BASE_REF` (default `main`). All durable state lives in git + filesystem.
+This is a deliberately reduced **Execute-Verify** harness — the simplified form of the PEV (Plan-Execute-Verify) pattern with the Plan stage left outside the harness boundary. No LLM Planner is run inside hero-coding, by design — see `docs/architecture-research-2026.md` §E.4 for the rationale.
+
+**Where Plan happens.** Plan typically lives in an upstream conversation between the user and an interactive coding agent (Claude Code, Codex, Cursor, etc.). The user discusses the change, the agent helps clarify scope and acceptance criteria, and the output of that session is committed as a story file (`inbox/us-XXX.md`). hero-coding picks up where that conversation ends:
+
+```
+user ⇄ Claude Code / Codex          hero-coding
+  │       (Plan)                      (Execute + Verify)
+  │                                       │
+  ▼                                       ▼
+  story.md  ─────  inbox/  ─────►  worker → verifier → judge → done/
+```
+
+The story is the **contract** between Plan and Execute — written down so the Judge can reference it, the Verifier can test it, and retries can replay against the same target. Conversational agents are good at clarifying and iterating; hero-coding is good at long-running deterministic execution. Each does what it's best at.
+
+The Verifier produces deterministic evidence (test exit codes); the Judge reads the verifier record + git diff before deciding. Verifier failure short-circuits to FAIL without burning a Judge LLM call.
 
 ## How It Works
 
 ### Dispatcher
 
-Watches `inbox/` for `.md` files. When a new user story appears:
+Watches `inbox/` for `.md` files. When a story appears it:
 
-1. Parses the frontmatter (id, title, priority, max_retries).
-2. Creates a dedicated git worktree on a branch `hero/{story-id}`.
-3. Enters the PASS-FAIL loop: spawn Worker → run Judge → if FAIL, append feedback to story and retry.
-4. On PASS, moves the story to `done/`. On exhaustion (all retries failed), records the run as `gave_up`.
+1. Parses the YAML frontmatter (id, title, priority, max_retries, verify, scope).
+2. Creates a git worktree on branch `hero/<id>` from `TARGET_BASE_REF`.
+3. Runs the round loop until PASS or `max_retries` exhausted.
+4. On PASS, moves the story to `done/`. On exhaustion, records the run as `gave_up`.
 
-### Worker
+State is persisted as JSON in `runs/state/<id>.json` after every round, so a crashed dispatcher resumes from the last completed round on restart.
 
-Spawns a coding agent as a child process. The agent receives the user story body as its prompt and works the codebase through tool calls (read, write, edit, bash, git). Every meaningful edit is committed atomically.
+### Worker (Role)
 
-**Guardrails** (enforced per round, ~50 lines of code):
+A native ReAct loop driving an OpenAI-compatible Chat Completions endpoint. Tools (bash, read_file, write_file, edit_file, grep, ls) come from the `internal/tools` package and execute in the worktree.
+
+The worker's behaviour is configured by a **Role** — system prompt + allowed-tools whitelist + optional model override. The default Worker role:
+- Hard-coded git-commit rule: every edit must be followed by `git commit` before any further reasoning.
+- Filesystem-as-context tool set (per Microsoft Azure SRE finding: bash + file primitives + grep beat 100+ specialised tools).
+
+**Schema-level tool restriction**: the LLM only sees the tools its Role allows. Disallowed tools physically do not exist in the schema, so the model cannot call them in the first place.
+
+**Guardrails** (defense-in-depth):
 
 | Guardrail | Trigger | Action |
 |---|---|---|
-| Tool-call cap | 80 tool calls in one round | Kill worker |
-| Wall-time cap | 5 minutes elapsed | Kill worker |
-| Loop detection | Same tool signature ≥4× in 6-call window | Kill worker |
-| Auto-rescue commit | Worker modified files but forgot to `git commit` | Dispatcher commits them so Judge can see the work |
+| Tool-call cap | 80 calls in one round | Kill round |
+| Wall-time cap | 5 minutes | Kill round |
+| Loop detection | Same tool+args ≥4× in 6-call window | Kill round |
+| Auto-rescue commit | Worker edited files but forgot to `git commit` | Dispatcher commits in-scope changes so Judge can see them |
 
-The loop detector catches the most common failure mode: a non-reasoning model getting stuck repeating the same action (e.g. `echo "done"` in a loop). The auto-rescue commit handles the case where the worker made the right changes but skipped the commit — without it, the Judge would see no commits and fail the round.
+### Verifier
 
-### Judge
+Runs the story's `verify:` shell commands (or the `HERO_DEFAULT_VERIFY` fallback) inside the worktree with a per-command timeout and CI=1 in env. Stdout/stderr are captured and tailed; full output goes to `runs/<id>-<ts>-verify-r<n>.log`.
 
-Reads the full git context since the base ref: commit log + complete diff. Sends it together with the user story to an LLM via OpenAI-compatible API. Returns a structured verdict:
+The Verifier is authoritative on its checks. If any command exits non-zero, the round short-circuits to FAIL without calling the Judge LLM.
+
+### Judge (Role)
+
+Reads the user story, the Verifier record, and `git log` + `git diff` since the base ref. Calls an OpenAI-compatible Chat Completions endpoint with `response_format: json_object` and returns:
 
 ```json
 {"verdict": "PASS", "reason": "…"}
 {"verdict": "FAIL", "reason": "concrete, actionable feedback for next round"}
 ```
 
-The Judge checks each Acceptance Criteria against the actual diffs. It is not a rubber stamp — it will fail a round if the worker didn't commit, modified out-of-scope files, or only partially addressed the criteria.
+The Judge fails a round if any Acceptance Criterion isn't visibly satisfied, scope was violated, or the verifier was red. Its reason is appended to the story file (`## Captain Feedback (auto)`) so the next Worker round sees it.
 
-### PASS-FAIL Loop
+### Worker / Judge use independent models
 
-```
-round 1: Worker → Judge FAIL → append feedback → round 2
-round 2: Worker (sees feedback) → Judge PASS → done/
-```
-
-At each FAIL, the Judge's reason is appended to the story file. The next Worker round sees the full story including all previous feedback, giving it context to correct course. The loop continues until PASS or `max_retries` is exhausted.
+`WORKER_*` and `JUDGE_*` env vars configure two separate LLM endpoints. Use a cheap fast model for Worker and a stronger model for Judge — or vice versa. The Role abstraction makes per-role model overrides trivial.
 
 ## Quick Start
 
 ```bash
-npm install
+# 1. Build
+go build -o hero ./cmd/hero
+
+# 2. Configure
 cp .env.example .env
-# edit .env: WORKER_PROVIDER, WORKER_MODEL, JUDGE_BASE_URL, JUDGE_API_KEY,
-#            JUDGE_MODEL, TARGET_REPO, optionally TARGET_BASE_REF
+# edit .env: WORKER_*, JUDGE_*, TARGET_REPO
 
-# prepare a target repo with a seed commit
-npm run setup-target
-
-# drop a user story
+# 3. Drop a story
 cp examples/stories/us-001.md inbox/
 
-# watch and run
-npm run watch
+# 4. Run
+./hero watch          # watch inbox/ continuously
+./hero run inbox/us-001.md   # process one story and exit
 ```
 
 ## Configuration
 
-Worker and Judge use independent model configurations. Both speak the **OpenAI-compatible Chat Completions API** — any model that implements this protocol works (OpenAI, Anthropic via proxy, open-source models via vLLM/Ollama, etc.).
+All configuration is via environment variables (loaded from `.env` if present).
 
-- **Worker** uses [pi-coding-agent](https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent) CLI. Configure providers in `pi-config/models.json`.
-- **Judge** uses the OpenAI SDK directly. Configure via `JUDGE_BASE_URL`, `JUDGE_API_KEY`, `JUDGE_MODEL` in `.env`.
-
-### Adding a Model Provider
-
-Edit `pi-config/models.json`:
-
-```json
-{
-  "providers": {
-    "my-provider": {
-      "baseUrl": "https://api.example.com/v1",
-      "api": "openai-completions",
-      "apiKey": "MY_API_KEY",
-      "compat": {
-        "supportsDeveloperRole": false,
-        "supportsReasoningEffort": false
-      },
-      "models": [
-        { "id": "my-model-id", "contextWindow": 128000, "maxTokens": 16000 }
-      ]
-    }
-  }
-}
-```
-
-Then set `WORKER_PROVIDER=my-provider` and `WORKER_MODEL=my-model-id` in `.env`. The `apiKey` field references an environment variable name (e.g. `MY_API_KEY`), so add `MY_API_KEY=…` to `.env` as well.
+| Var | Required | Default | Description |
+|---|---|---|---|
+| `WORKER_BASE_URL` | yes | — | Worker LLM endpoint (OpenAI-compatible) |
+| `WORKER_API_KEY`  | yes | — | Worker API key |
+| `WORKER_MODEL`    | yes | — | Worker model id |
+| `JUDGE_BASE_URL`  | yes | — | Judge LLM endpoint |
+| `JUDGE_API_KEY`   | yes | — | Judge API key |
+| `JUDGE_MODEL`     | yes | — | Judge model id |
+| `TARGET_REPO`     | yes | — | Absolute path to the target git repo |
+| `TARGET_BASE_REF` | no  | `main` | Branch / ref each worktree is cut from |
+| `MAX_RETRIES`     | no  | `3` | Round budget per story (story-level `max_retries:` overrides) |
+| `MAX_PARALLEL`    | no  | `2` | Concurrent stories the watcher will process |
+| `HERO_DEFAULT_VERIFY` | no | (empty) | Newline-separated default verifier commands when a story has no `verify:` |
+| `HERO_VERIFY_TIMEOUT_MS` | no | `120000` | Per-command timeout for the verifier |
 
 ## User Story Format
 
@@ -130,29 +151,70 @@ Then set `WORKER_PROVIDER=my-provider` and `WORKER_MODEL=my-model-id` in `.env`.
 ---
 id: us-001
 title: Add timezone parameter to formatDate
-created: 2026-04-28T09:00
 priority: normal
 max_retries: 3
+verify:
+  - npm test
+  - npm run typecheck
+scope:
+  - src/**
+  - tests/**
 ---
 
 ## Goal
 Add an optional `timezone` parameter to `formatDate` in `src/utils.ts`.
 
 ## Acceptance Criteria
-- [ ] Function signature accepts `timezone?: string` (default `"UTC"`)
-- [ ] Existing callers continue to work unchanged
-- [ ] Add 3 tests in `tests/utils.test.ts` covering UTC / specific tz / default
-- [ ] `npm test` passes
+- [ ] `formatDate(date, timezone?: string)` — second argument is optional, defaults to `"UTC"`.
+- [ ] When timezone is omitted or `"UTC"`, output is byte-identical to today.
+- [ ] When a valid IANA tz string is passed, date is formatted in that zone.
+- [ ] Add 3 tests in `tests/utils.test.ts`.
+- [ ] `npm test` passes.
 
 ## Constraints
-- Do not modify other files
-- Keep TypeScript strict mode
+- Do not modify other functions in `src/utils.ts`.
+- Keep TypeScript strict mode happy.
 
 ## Out of Scope
-- Locale / formatting style changes
+- Locale / month-name changes.
 ```
 
-`Out of Scope` is as important as `Goal` — it prevents the agent from "helpfully" refactoring unrelated code. The `max_retries` field overrides the global `MAX_RETRIES` default per story.
+Frontmatter fields:
+
+| Field | Required | Description |
+|---|---|---|
+| `id` | yes | Must match `[A-Za-z0-9][A-Za-z0-9._-]*` (used as git branch suffix) |
+| `title` | yes | Human-readable title |
+| `priority` | no | `low` \| `normal` \| `high` (default `normal`) |
+| `max_retries` | no | Overrides `MAX_RETRIES` env var for this story |
+| `verify` | no | Shell commands the Verifier runs after each round |
+| `scope` | no | Glob patterns the auto-rescue commit will stage (others left untouched) |
+
+`Out of Scope` is as important as `Goal` — it stops the agent from "helpfully" refactoring unrelated code.
+
+## Layout
+
+```
+cmd/hero/                  CLI entry point
+internal/
+  agent/                   OpenAI-compatible Chat Completions client
+  config/                  env-driven configuration
+  dispatcher/              orchestrator + git worktree mgmt + inbox watcher
+  judge/                   PEV verdict (verifier short-circuit + LLM)
+  logging/                 slog helpers
+  role/                    Role abstraction (system prompt + allowed tools + model)
+  state/                   per-story persistent stats (atomic JSON)
+  story/                   frontmatter parser + judge-feedback appender
+  tooldef/                 Tool interface
+  tools/                   bash, read_file, write_file, edit_file, grep, find, ls, read_tracker
+  verifier/                deterministic shell-command runner
+  worker/                  ReAct loop, guardrails, schema-level tool filter, JSONL trace
+inbox/                     drop user stories here
+done/                      stories that reached PASS land here
+runs/                      per-run JSON, verifier logs, JSONL traces, state/
+worktrees/                 one git worktree per active story
+examples/                  sample stories + a target repo
+```
 
 ## License
 
