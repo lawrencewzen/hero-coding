@@ -100,6 +100,21 @@ func (d *Dispatcher) RunOnce(ctx context.Context, storyPath string) (*state.Stat
 	}
 	resume := prior != nil && prior.FinalStatus == "running"
 
+	// Validate resume preconditions: the recorded baseSha must still resolve
+	// in the target repo. The owner can `setup-target.sh` between runs which
+	// nukes .git and re-seeds, leaving stale state pointing at vanished SHAs;
+	// detecting that here lets us fall back to a fresh start instead of
+	// crashing later in `git worktree add`.
+	if resume {
+		if _, gerr := git(ctx, d.cfg.Target.Repo, "rev-parse", "--verify", prior.BaseSha+"^{commit}"); gerr != nil {
+			d.log.Warn("recorded baseSha no longer in target repo — discarding stale state and starting fresh",
+				"base_sha", prior.BaseSha, "err", gerr)
+			_ = state.Clear(d.paths.StateDir, storyKey)
+			prior = nil
+			resume = false
+		}
+	}
+
 	var stats *state.Stats
 	var baseSha, worktreePath string
 	startRound := 1
