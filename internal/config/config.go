@@ -6,13 +6,16 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"hero-coding/internal/provider"
 )
 
-// Config aggregates everything hero-coding needs at runtime, populated
-// purely from environment variables (loaded by the caller from .env).
+// Config is the validated runtime configuration. Construct with Load();
+// resolve per-role connections via LLMFor.
 type Config struct {
-	Worker WorkerConfig
-	Judge  LLMConfig // re-uses the LLM client struct directly
+	Providers provider.Registry
+	Roles     map[string]provider.Binding // "worker" -> {Provider, Model}
+
 	Target TargetConfig
 
 	MaxRetries  int
@@ -22,41 +25,53 @@ type Config struct {
 	VerifyTimeout         time.Duration
 }
 
-// WorkerConfig is the worker LLM connection. Same shape as LLMConfig but
-// kept as a distinct type so future worker-only knobs (tool budget,
-// system prompt overrides, etc.) have a clear home.
-type WorkerConfig struct {
-	BaseURL string
-	APIKey  string
-	Model   string
-}
-
-func (w WorkerConfig) ToLLM() LLMConfig {
-	return LLMConfig{BaseURL: w.BaseURL, APIKey: w.APIKey, Model: w.Model}
-}
-
 type TargetConfig struct {
 	Repo    string
 	BaseRef string
 }
 
-// Load reads the process environment and returns a validated Config.
-// Required vars: WORKER_BASE_URL, WORKER_API_KEY, WORKER_MODEL,
-// JUDGE_BASE_URL, JUDGE_API_KEY, JUDGE_MODEL, TARGET_REPO.
+// Load reads providers + role bindings + workspace settings from env.
+//
+// Required:
+//   - At least one HERO_PROVIDER_<name>_{BASE_URL,API_KEY} pair
+//   - HERO_WORKER and HERO_JUDGE bindings, each "<provider>/<model>"
+//   - TARGET_REPO
 func Load() (*Config, error) {
+	reg, err := provider.LoadRegistry()
+	if err != nil {
+		return nil, err
+	}
+	if len(reg) == 0 {
+		return nil, fmt.Errorf("no providers defined; set at least one HERO_PROVIDER_<name>_BASE_URL + HERO_PROVIDER_<name>_API_KEY")
+	}
+
+	roles := map[string]provider.Binding{}
+	for _, role := range []string{"worker", "judge"} {
+		envKey := "HERO_" + strings.ToUpper(role)
+		raw := os.Getenv(envKey)
+		if raw == "" {
+			return nil, fmt.Errorf("missing role binding %s (expected %q, e.g. coproxy/gpt-5.4)", envKey, "<provider>/<model>")
+		}
+		b, err := provider.ParseBinding(raw)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", envKey, err)
+		}
+		if _, err := reg.Get(b.Provider, envKey); err != nil {
+			return nil, err
+		}
+		roles[role] = b
+	}
+
+	repo := os.Getenv("TARGET_REPO")
+	if repo == "" {
+		return nil, fmt.Errorf("missing required env var: TARGET_REPO")
+	}
+
 	cfg := &Config{
-		Worker: WorkerConfig{
-			BaseURL: os.Getenv("WORKER_BASE_URL"),
-			APIKey:  os.Getenv("WORKER_API_KEY"),
-			Model:   os.Getenv("WORKER_MODEL"),
-		},
-		Judge: LLMConfig{
-			BaseURL: os.Getenv("JUDGE_BASE_URL"),
-			APIKey:  os.Getenv("JUDGE_API_KEY"),
-			Model:   os.Getenv("JUDGE_MODEL"),
-		},
+		Providers: reg,
+		Roles:     roles,
 		Target: TargetConfig{
-			Repo:    os.Getenv("TARGET_REPO"),
+			Repo:    repo,
 			BaseRef: getEnvDefault("TARGET_BASE_REF", "main"),
 		},
 		MaxRetries:            getEnvInt("MAX_RETRIES", 3),
@@ -64,22 +79,26 @@ func Load() (*Config, error) {
 		DefaultVerifyCommands: splitNonEmpty(os.Getenv("HERO_DEFAULT_VERIFY"), "\n"),
 		VerifyTimeout:         time.Duration(max1(getEnvInt("HERO_VERIFY_TIMEOUT_MS", 120_000))) * time.Millisecond,
 	}
-
-	required := map[string]string{
-		"WORKER_BASE_URL": cfg.Worker.BaseURL,
-		"WORKER_API_KEY":  cfg.Worker.APIKey,
-		"WORKER_MODEL":    cfg.Worker.Model,
-		"JUDGE_BASE_URL":  cfg.Judge.BaseURL,
-		"JUDGE_API_KEY":   cfg.Judge.APIKey,
-		"JUDGE_MODEL":     cfg.Judge.Model,
-		"TARGET_REPO":     cfg.Target.Repo,
-	}
-	for k, v := range required {
-		if v == "" {
-			return nil, fmt.Errorf("missing required env var: %s", k)
-		}
-	}
 	return cfg, nil
+}
+
+// LLMFor resolves a role binding ("worker", "judge") into the connection
+// LLMClient needs. Errors are explicit about which role asked for what.
+func (c *Config) LLMFor(role string) (LLMConfig, error) {
+	b, ok := c.Roles[role]
+	if !ok {
+		return LLMConfig{}, fmt.Errorf("role %q not configured", role)
+	}
+	p, err := c.Providers.Get(b.Provider, "HERO_"+strings.ToUpper(role))
+	if err != nil {
+		return LLMConfig{}, err
+	}
+	return LLMConfig{
+		BaseURL:     p.BaseURL,
+		APIKey:      p.APIKey,
+		Model:       b.Model,
+		InsecureTLS: p.InsecureTLS,
+	}, nil
 }
 
 func getEnvDefault(key, def string) string {

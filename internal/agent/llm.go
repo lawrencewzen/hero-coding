@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -63,6 +64,18 @@ func (c *LLMClient) ModelName() string {
 
 func NewLLMClient(cfg *config.LLMConfig) *LLMClient {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
+	if cfg != nil && cfg.InsecureTLS {
+		// Local self-signed proxies (e.g. coproxy) need this. Provider-scoped
+		// in config so a single rogue endpoint can't relax TLS for everyone.
+		tlsCfg := transport.TLSClientConfig
+		if tlsCfg == nil {
+			tlsCfg = &tls.Config{}
+		} else {
+			tlsCfg = tlsCfg.Clone()
+		}
+		tlsCfg.InsecureSkipVerify = true
+		transport.TLSClientConfig = tlsCfg
+	}
 	return &LLMClient{
 		cfg: cfg,
 		client: &http.Client{

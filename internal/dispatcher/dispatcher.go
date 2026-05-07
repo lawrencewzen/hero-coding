@@ -48,28 +48,40 @@ func DefaultPaths(root string) Paths {
 
 // Dispatcher executes stories. Construct once, reuse across stories.
 type Dispatcher struct {
-	cfg    *config.Config
-	paths  Paths
-	roles  role.Roles
-	worker *worker.Worker
-	log    *slog.Logger
+	cfg       *config.Config
+	paths     Paths
+	roles     role.Roles
+	worker    *worker.Worker
+	workerCfg config.LLMConfig
+	judgeCfg  config.LLMConfig
+	log       *slog.Logger
 }
 
 // New builds a Dispatcher using role.Defaults(). Use NewWithRoles to
 // override individual roles (e.g. swap in a stricter Worker prompt or
 // pin a specific model per role).
-func New(cfg *config.Config, paths Paths) *Dispatcher {
+func New(cfg *config.Config, paths Paths) (*Dispatcher, error) {
 	return NewWithRoles(cfg, paths, role.Defaults())
 }
 
-func NewWithRoles(cfg *config.Config, paths Paths, roles role.Roles) *Dispatcher {
-	return &Dispatcher{
-		cfg:    cfg,
-		paths:  paths,
-		roles:  roles,
-		worker: worker.New(cfg.Worker, roles.Worker),
-		log:    slog.Default(),
+func NewWithRoles(cfg *config.Config, paths Paths, roles role.Roles) (*Dispatcher, error) {
+	workerCfg, err := cfg.LLMFor("worker")
+	if err != nil {
+		return nil, err
 	}
+	judgeCfg, err := cfg.LLMFor("judge")
+	if err != nil {
+		return nil, err
+	}
+	return &Dispatcher{
+		cfg:       cfg,
+		paths:     paths,
+		roles:     roles,
+		worker:    worker.New(workerCfg, roles.Worker),
+		workerCfg: workerCfg,
+		judgeCfg:  judgeCfg,
+		log:       slog.Default(),
+	}, nil
 }
 
 // RunOnce processes a single story file end-to-end.
@@ -147,8 +159,8 @@ func (d *Dispatcher) RunOnce(ctx context.Context, storyPath string) (*state.Stat
 			StoryID: sid, StoryTitle: s.Frontmatter.Title,
 			Branch: branch, BaseRef: d.cfg.Target.BaseRef, BaseSha: baseSha,
 			WorktreePath: worktreePath,
-			Worker:       state.WorkerRef{BaseURL: d.cfg.Worker.BaseURL, Model: d.cfg.Worker.Model},
-			Judge:        state.JudgeRef{BaseURL: d.cfg.Judge.BaseURL, Model: d.cfg.Judge.Model},
+			Worker:       state.WorkerRef{BaseURL: d.workerCfg.BaseURL, Model: d.workerCfg.Model},
+			Judge:        state.JudgeRef{BaseURL: d.judgeCfg.BaseURL, Model: d.judgeCfg.Model},
 			StartedAt:    state.NowISO(),
 			WorkerRuns:   []state.WorkerRunStats{},
 			Verifications: []state.VerifierRecord{},
@@ -194,7 +206,7 @@ func (d *Dispatcher) RunOnce(ctx context.Context, storyPath string) (*state.Stat
 		stats.Verifications = append(stats.Verifications, v)
 
 		jv, err := judge.Run(ctx, judge.Options{
-			Story: s, Judge: d.cfg.Judge, Role: d.roles.Judge,
+			Story: s, Judge: d.judgeCfg, Role: d.roles.Judge,
 			TargetRepo: worktreePath,
 			BaseRef:    baseSha, Round: round, Verifier: v,
 		})

@@ -34,7 +34,11 @@ func main() {
 		os.Exit(2)
 	}
 	paths := dispatcher.DefaultPaths(cwd)
-	d := dispatcher.New(cfg, paths)
+	d, err := dispatcher.New(cfg, paths)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "init dispatcher:", err)
+		os.Exit(2)
+	}
 
 	ctx, cancel := signalContext()
 	defer cancel()

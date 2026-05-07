@@ -47,13 +47,12 @@ type Worker struct {
 
 // New constructs a Worker bound to a worker LLM connection. If role.Model
 // is non-empty it overrides cfg.Model for this Worker.
-func New(cfg config.WorkerConfig, r role.Role) *Worker {
-	llmCfg := cfg.ToLLM()
+func New(cfg config.LLMConfig, r role.Role) *Worker {
 	if r.Model != "" {
-		llmCfg.Model = r.Model
+		cfg.Model = r.Model
 	}
 	return &Worker{
-		llm:  agent.NewLLMClient(&llmCfg),
+		llm:  agent.NewLLMClient(&cfg),
 		role: r,
 	}
 }
