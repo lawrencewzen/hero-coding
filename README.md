@@ -106,7 +106,7 @@ The Judge fails a round if any Acceptance Criterion isn't visibly satisfied, sco
 
 ### Worker / Judge use independent models
 
-`WORKER_*` and `JUDGE_*` env vars configure two separate LLM endpoints. Use a cheap fast model for Worker and a stronger model for Judge — or vice versa. The Role abstraction makes per-role model overrides trivial.
+Worker and Judge each bind to a `<provider>/<model>` pair via env. They can share one provider, or point at completely different endpoints. See [Configuration](#configuration) below.
 
 ## Quick Start
 
@@ -128,16 +128,43 @@ cp examples/stories/us-001.md inbox/
 
 ## Configuration
 
-All configuration is via environment variables (loaded from `.env` if present).
+All configuration is via environment variables (loaded from `.env` if present). The model is two-layered: define **providers** once, then **bind roles** to a `<provider>/<model>` pair.
+
+### Providers
+
+```bash
+# Pattern: HERO_PROVIDER_<name>_{BASE_URL,API_KEY,INSECURE_TLS}
+HERO_PROVIDER_coproxy_BASE_URL=https://localhost:8443/v1
+HERO_PROVIDER_coproxy_API_KEY=sk-...
+HERO_PROVIDER_coproxy_INSECURE_TLS=true   # dev-only: accept self-signed certs
+
+HERO_PROVIDER_openai_BASE_URL=https://api.openai.com/v1
+HERO_PROVIDER_openai_API_KEY=sk-...
+```
+
+`<name>` may be any `[A-Za-z0-9._-]+` identifier. `INSECURE_TLS` is optional (default `false`); use it only for local self-signed proxies.
+
+### Role bindings
+
+```bash
+HERO_WORKER=coproxy/gpt-5.4    # provider/model
+HERO_JUDGE=openai/gpt-5.5
+```
+
+**Switching is one line.**
+
+| Goal | Change |
+|---|---|
+| Swap worker model on the same provider | `HERO_WORKER=coproxy/claude-4.7` |
+| Swap worker to a different provider | `HERO_WORKER=openai/gpt-5.5` |
+| Cheap worker + strong judge (or vice versa) | Edit both lines |
+| One-off run without touching `.env` | `HERO_WORKER=openai/gpt-5.5 ./hero run inbox/us-001.md` |
+| Add a new endpoint | Add three `HERO_PROVIDER_<name>_*` lines, then bind |
+
+### Other settings
 
 | Var | Required | Default | Description |
 |---|---|---|---|
-| `WORKER_BASE_URL` | yes | — | Worker LLM endpoint (OpenAI-compatible) |
-| `WORKER_API_KEY`  | yes | — | Worker API key |
-| `WORKER_MODEL`    | yes | — | Worker model id |
-| `JUDGE_BASE_URL`  | yes | — | Judge LLM endpoint |
-| `JUDGE_API_KEY`   | yes | — | Judge API key |
-| `JUDGE_MODEL`     | yes | — | Judge model id |
 | `TARGET_REPO`     | yes | — | Absolute path to the target git repo |
 | `TARGET_BASE_REF` | no  | `main` | Branch / ref each worktree is cut from |
 | `MAX_RETRIES`     | no  | `3` | Round budget per story (story-level `max_retries:` overrides) |

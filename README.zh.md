@@ -106,7 +106,7 @@ Verifier 在自己的 check 上是权威的。任何命令非 0 退出,这一轮
 
 ### Worker / Judge 用各自独立的模型
 
-`WORKER_*` 和 `JUDGE_*` 是两组独立的 env,配两个不同的 LLM endpoint。Worker 用便宜快速的模型、Judge 用更强的模型,或者反过来,都行。Role 抽象让"按角色覆盖 model"成本几乎为零。
+Worker 和 Judge 各自通过 env 绑定一个 `<provider>/<model>` 组合。它们可以共享一个 provider,也可以分别指向完全不同的 endpoint。详见下面的 [配置](#配置)。
 
 ## 快速开始
 
@@ -128,16 +128,43 @@ cp examples/stories/us-001.md inbox/
 
 ## 配置
 
-所有配置走环境变量(若存在 `.env` 会自动加载)。
+所有配置走环境变量(若存在 `.env` 会自动加载)。模型分两层:**Provider** 定义一次 endpoint,然后 **Role 绑定** 到 `<provider>/<model>` 组合。
+
+### Providers
+
+```bash
+# 命名模式: HERO_PROVIDER_<name>_{BASE_URL,API_KEY,INSECURE_TLS}
+HERO_PROVIDER_coproxy_BASE_URL=https://localhost:8443/v1
+HERO_PROVIDER_coproxy_API_KEY=sk-...
+HERO_PROVIDER_coproxy_INSECURE_TLS=true   # 仅开发用:接受自签名证书
+
+HERO_PROVIDER_openai_BASE_URL=https://api.openai.com/v1
+HERO_PROVIDER_openai_API_KEY=sk-...
+```
+
+`<name>` 可以是任意 `[A-Za-z0-9._-]+` 标识符。`INSECURE_TLS` 可选(默认 `false`),只在对接本地自签名 proxy 时用。
+
+### Role 绑定
+
+```bash
+HERO_WORKER=coproxy/gpt-5.4    # provider/model
+HERO_JUDGE=openai/gpt-5.5
+```
+
+**切换就改一行**。
+
+| 目标 | 改动 |
+|---|---|
+| 同 provider 换 worker 模型 | `HERO_WORKER=coproxy/claude-4.7` |
+| 换到完全不同的 provider | `HERO_WORKER=openai/gpt-5.5` |
+| 便宜的 worker + 强的 judge(或反过来) | 改两行 |
+| 单次跑,不污染 `.env` | `HERO_WORKER=openai/gpt-5.5 ./hero run inbox/us-001.md` |
+| 接入新 endpoint | 加三行 `HERO_PROVIDER_<name>_*`,然后绑定 |
+
+### 其它配置
 
 | 变量 | 必填 | 默认 | 说明 |
 |---|---|---|---|
-| `WORKER_BASE_URL` | 是 | — | Worker LLM endpoint (OpenAI 兼容) |
-| `WORKER_API_KEY`  | 是 | — | Worker API key |
-| `WORKER_MODEL`    | 是 | — | Worker model id |
-| `JUDGE_BASE_URL`  | 是 | — | Judge LLM endpoint |
-| `JUDGE_API_KEY`   | 是 | — | Judge API key |
-| `JUDGE_MODEL`     | 是 | — | Judge model id |
 | `TARGET_REPO`     | 是 | — | 目标 git 仓库的绝对路径 |
 | `TARGET_BASE_REF` | 否 | `main` | 每个 worktree 的 base 分支 / ref |
 | `MAX_RETRIES`     | 否 | `3` | 单 story 的轮次预算(story 自带 `max_retries:` 会覆盖) |
