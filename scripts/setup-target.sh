@@ -9,6 +9,12 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PRISTINE="$ROOT/examples/target-repo-pristine"
 REPO="$ROOT/examples/target-repo"
 
+# Resetting target-repo invalidates any in-flight hero state that points
+# at the old commit graph; wipe it so the next ./hero run starts clean
+# instead of trying to resume against vanished SHAs.
+rm -rf "$ROOT/runs/state" "$ROOT/runs/traces" "$ROOT/worktrees"
+echo "[setup-target] wiped hero runtime state (runs/state, runs/traces, worktrees)"
+
 if [ ! -d "$PRISTINE" ]; then
   echo "missing pristine snapshot: $PRISTINE" >&2
   exit 1

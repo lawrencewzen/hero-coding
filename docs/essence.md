@@ -261,7 +261,7 @@ autoRescueCommit 的逻辑:**verifier 之前**扫一遍 `git status`,有 dirty f
 
 放这个位置的原因 = **必须在 verifier 看 working tree 之前完成**,否则 verifier 也会跑出错(比如 `go test` 看到 syntax error 是因为 worker 写了一半的文件还没 commit,但其实 worker 已经在 worktree 里改完了)。
 
-### 🚩 踩坑记录:resume 时 baseSha 死链
+### 🚩 踩坑记录:resume 时 baseSha 死链(defense-in-depth 修法)
 
 **bug 复现**:
 1. 第一次跑 us-001,coproxy 断了,worker 中途崩,state 留在 `running`,记录的 baseSha 是 `ff4d25b...`
@@ -270,18 +270,68 @@ autoRescueCommit 的逻辑:**verifier 之前**扫一遍 `git status`,有 dirty f
 4. 拿 baseSha `ff4d25b...` 喂给 `git worktree add`
 5. **fatal: invalid reference: ff4d25b...**(因为新的 .git 完全不知道这个 commit)
 
-**修法**(commit `98a9a0c`):resume 路径开头加一行 `git rev-parse --verify <baseSha>^{commit}`,失败就 clear state、当作首次跑:
+**思考过的 5 种修法**:
+
+| 方案                                   | 评价                              |
+| ------------------------------------ | ------------------------------- |
+| A. setup-target.sh 末尾删 hero 状态     | 治本,但只覆盖走脚本的场景               |
+| B. dispatcher 入口校验 baseSha          | 自愈,但只治症状的一种切片;每次启动 spawn git |
+| C. canResume 谓词收口所有前置条件         | 可读性 + 可扩展                       |
+| D. 不存 baseSha,resume 时实时 rev-parse | 极简,但语义改:resume 会跑在更新的 base 上 |
+| E. catch git 错误后 fallback           | 错误处理散乱,日志混乱                  |
+
+**最终修法 = A + C 组合**(defense in depth):
+
+**层 1 — root cause**(`scripts/setup-target.sh`):
+
+```bash
+rm -rf "$ROOT/runs/state" "$ROOT/runs/traces" "$ROOT/worktrees"
+echo "[setup-target] wiped hero runtime state"
+```
+
+99% 走 setup 脚本的场景在这里就清干净了,dispatcher 启动时根本不会有 stale state。
+
+**层 2 — symptom net**(`internal/dispatcher/dispatcher.go`):
 
 ```go
-if resume {
+// 把所有 resume 前置条件收成一个有名谓词
+func (d *Dispatcher) canResume(ctx, prior) string {
     if _, err := git("rev-parse", "--verify", prior.BaseSha+"^{commit}"); err != nil {
-        d.log.Warn("recorded baseSha no longer exists, falling back to fresh start")
+        return fmt.Sprintf("baseSha %s no longer exists: %v", prior.BaseSha, err)
+    }
+    return ""    // 空字符串 = 可以 resume
+}
+
+// 调用处
+if resume {
+    if reason := d.canResume(ctx, prior); reason != "" {
+        d.log.Warn("resume preconditions failed", "reason", reason)
         state.Clear(...); prior = nil; resume = false
     }
 }
 ```
 
-**教训**:**resume 不能 trust state**,必须验外部世界(git repo 状态)是否还跟 state 记录一致。类似的还有"worktree 目录是否还在"(已有的 `isWorktreeOnBranch` 检查)。
+兜住所有非 setup-target 路径:用户手敲 `git reset --hard <earlier>`、`rm -rf .git && git init`、远端 force-push、把 base ref 改名……
+
+**为什么不用方案 D(不存 baseSha)?**
+
+存的好处是 round 之间 base 不漂移。如果不存:
+
+```
+round 1: base = main = abc123
+worker 改了点东西
+round 1 完成,state.Write
+... 用户在 main 上 push 了几个 commit, main 变成 def456
+round 2 拿 main → base = def456
+judge 看 git diff base..HEAD → 看到 worker 没做的改动也在范围里
+```
+
+这种漂移会让 judge 的"改动范围"判断错乱,debug 难。所以**存 baseSha + 校验**比**不存**更安全。
+
+**教训**:
+- **resume 不能 trust state**,必须验外部世界(git repo)还跟 state 记录一致
+- **defense in depth > single layer**,setup 脚本 + dispatcher 检查双保险,任何一层失守另一层兜
+- 改语义换简单是**糟糕权衡**,语义微妙变化常常成为后续 bug 的源头
 
 ### 🚩 踩坑记录:state 文件损坏不能静默当 nil
 
@@ -397,12 +447,12 @@ func (w *Worker) Run(ctx, opts) (Stats, error) {
 
 ### Defense-in-depth 4 层(背下来这表)
 
-| 层           | 机制                                          | 失败模式             |
-| ----------- | ------------------------------------------- | ---------------- |
-| **Prompt**  | system prompt 写"你只能用 X, Y, Z"               | 模型可能不遵循         |
-| **Schema**  | LLM 看到的 `tools[]` 只含 allowed —— **物理上不存在被禁工具** | 模型即使想用也调不出      |
-| **Runtime** | `guardrails.observe()` 调用前拦截               | 兜底 schema 漏网 / 调用循环 / 总数超限 |
-| **Tool**    | `sandboxPath` 限制路径在 worktree 内              | 路径穿越 / symlink 逃逸 |
+| 层           | 机制                                             | 失败模式                       |
+| ----------- | ---------------------------------------------- | -------------------------- |
+| **Prompt**  | system prompt 写"你只能用 X, Y, Z"                  | 模型可能不遵循                    |
+| **Schema**  | LLM 看到的 `tools[]` 只含 allowed —— **物理上不存在被禁工具** | 模型即使想用也调不出                 |
+| **Runtime** | `guardrails.observe()` 调用前拦截                   | 兜底 schema 漏网 / 调用循环 / 总数超限 |
+| **Tool**    | `sandboxPath` 限制路径在 worktree 内                 | 路径穿越 / symlink 逃逸          |
 
 🔍 **易混点:Schema 层 vs Runtime 层**——以前的实现是 schema 全暴露(让 LLM 自由调),guardrails 在调用后看到不该用就 kill。这是**事后拦截**,模型已经"决策"过、消耗过 token、思路已经被污染。
 

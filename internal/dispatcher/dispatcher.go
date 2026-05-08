@@ -84,6 +84,26 @@ func NewWithRoles(cfg *config.Config, paths Paths, roles role.Roles) (*Dispatche
 	}, nil
 }
 
+// canResume checks every precondition that must hold before we can trust
+// `prior` and continue from a half-finished run. Returns an empty string
+// when the resume is safe, or a short reason describing why not.
+//
+// Things that can invalidate state between runs:
+//   - operator ran scripts/setup-target.sh, nuking .git and re-seeding
+//     (state.BaseSha vanishes from the new commit graph)
+//   - operator did `git reset --hard <earlier>` or a force-pushed remote
+//   - operator manually deleted the target repo and re-cloned
+//
+// The setup-target.sh script also wipes runs/state/ for the common case,
+// so this function is the dispatcher-side belt for any path that did not
+// run that script.
+func (d *Dispatcher) canResume(ctx context.Context, prior *state.Stats) string {
+	if _, err := git(ctx, d.cfg.Target.Repo, "rev-parse", "--verify", prior.BaseSha+"^{commit}"); err != nil {
+		return fmt.Sprintf("baseSha %s no longer exists in target repo: %v", prior.BaseSha, err)
+	}
+	return ""
+}
+
 // RunOnce processes a single story file end-to-end.
 func (d *Dispatcher) RunOnce(ctx context.Context, storyPath string) (*state.Stats, error) {
 	s, err := story.Parse(storyPath)
@@ -100,15 +120,10 @@ func (d *Dispatcher) RunOnce(ctx context.Context, storyPath string) (*state.Stat
 	}
 	resume := prior != nil && prior.FinalStatus == "running"
 
-	// Validate resume preconditions: the recorded baseSha must still resolve
-	// in the target repo. The owner can `setup-target.sh` between runs which
-	// nukes .git and re-seeds, leaving stale state pointing at vanished SHAs;
-	// detecting that here lets us fall back to a fresh start instead of
-	// crashing later in `git worktree add`.
 	if resume {
-		if _, gerr := git(ctx, d.cfg.Target.Repo, "rev-parse", "--verify", prior.BaseSha+"^{commit}"); gerr != nil {
-			d.log.Warn("recorded baseSha no longer in target repo — discarding stale state and starting fresh",
-				"base_sha", prior.BaseSha, "err", gerr)
+		if reason := d.canResume(ctx, prior); reason != "" {
+			d.log.Warn("resume preconditions failed — discarding stale state and starting fresh",
+				"reason", reason)
 			_ = state.Clear(d.paths.StateDir, storyKey)
 			prior = nil
 			resume = false
