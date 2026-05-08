@@ -933,39 +933,205 @@ if exists(path) && !readTracker.HasRead(path) {
 
 ## 9. Watcher = goroutine + 信号量
 
-```go
-// dispatcher/watch.go — 用 channel 当 semaphore
-sem := make(chan struct{}, MaxParallel)  // buffer 大小 = 并发上限
-inflight := sync.Map{}                    // 防同一文件被 dispatch 两次
+### 这一节在解决什么问题
 
-dispatch := func(path) {
-    if inflight.LoadOrStore(path) {
-        return                            // 已在跑 / 已 enqueue,跳过
+Inbox 里**同时**可能出现:
+- 你 startup 之前就放进去的 5 个 story(backlog)
+- 你跑着的时候用 `cp` 又新增的 3 个(live)
+
+要求:
+1. 每个 story 都被处理一次,不漏不重
+2. **不能两个 goroutine 同时跑同一个 story**(会撞 worktree、撞 state 文件)
+3. **总并发不能超过 `MaxParallel`**(LLM API 配额、机器资源限制)
+
+需要两个**独立**的并发原语来解决这两个不同的问题 —— 这是这节最容易混的地方。
+
+### 两个原语,各管一件事
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  inflight: sync.Map                                         │
+│      问题: "这个 story 是不是已经在跑了?"                       │
+│      key:   absolute path of story.md                       │
+│      value: struct{} (只用作存在标记)                          │
+│      作用: 同 story 来第二次时直接 return,避免重复 dispatch     │
+└─────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────┐
+│  sem: chan struct{} (buffer = MaxParallel)                  │
+│      问题: "全局还有空 slot 吗?"                              │
+│      容量: MaxParallel(默认 2)                              │
+│      作用: 第 3 个 story 来时阻塞,等前面有 goroutine 完成        │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 一个 story 走完整条路径
+
+```
+1. fsnotify 报 "inbox/us-007.md Created"
+   或 startup 时 readDir 扫到这个文件
+                    │
+                    ▼
+2. dispatch("/abs/.../inbox/us-007.md") 被调用
+                    │
+                    ▼
+3. inflight.LoadOrStore(path, struct{}{})
+   "如果 key 不存在就 store,返回 (zero, false)"
+   "如果已存在就什么都不动,返回 (oldValue, true)"
+                    │
+            ┌───────┴───────┐
+       loaded=true      loaded=false
+       (重复触发)       (新文件)
+            │               │
+          return            ▼
+                    4. spawn 一个 goroutine
+                            │
+                            ▼
+                    5. sem <- struct{}{}    ← 写入 channel
+                       channel 满了就阻塞
+                       (其他 goroutine 还在跑 RunOnce 时)
+                            │
+                            ▼ (拿到 slot)
+                    6. d.RunOnce(ctx, path)  ← 真正干活,可能 1-5 分钟
+                            │
+                            ▼
+                    7. <-sem                ← 读出,释放 slot
+                            │
+                            ▼
+                    8. inflight.Delete(path) ← 允许这个文件再次被 dispatch
+                                              (实际不会,因为已经移到 done/)
+```
+
+### 骨架(去掉错误处理)
+
+```go
+sem := make(chan struct{}, MaxParallel)  // 容量 = 上限,buffer 满即阻塞
+var inflight sync.Map                     // path → struct{} 占位
+
+dispatch := func(path string) {
+    if !strings.HasSuffix(path, ".md") { return }
+    abs, _ := filepath.Abs(path)
+
+    // LoadOrStore 是 sync.Map 的原子操作:看一眼+写入是一个不可分割的步骤。
+    // 两个 goroutine 同时进来,只有一个会拿到 loaded=false。
+    if _, loaded := inflight.LoadOrStore(abs, struct{}{}); loaded {
+        return                            // 已经有人在跑,我退出
     }
+
     go func() {
-        sem <- struct{}{}                 // 拿令牌(满了会阻塞)
-        defer func() { <-sem }()          // 还令牌
-        d.RunOnce(ctx, path)
-        inflight.Delete(path)             // RunOnce 结束后才删,允许重新 dispatch
+        defer inflight.Delete(abs)
+
+        sem <- struct{}{}                 // 申请 slot (acquire)
+        defer func() { <-sem }()          // 函数返回时释放 slot (release)
+
+        d.RunOnce(ctx, abs)                // 真正跑 PEV round loop
     }()
 }
 
-// 1. 启动时扫一遍 inbox(可能有未处理的 backlog)
-for _, f := range readDir(inbox) { dispatch(f) }
+// (1) 启动时扫 backlog
+for _, f := range readDir(inbox) { dispatch(filepath.Join(inbox, f.Name())) }
 
-// 2. 之后用 fsnotify 听新事件
-watcher.On("Create", dispatch)
+// (2) 之后听 fsnotify
+watcher.Add(inbox)
+for ev := range watcher.Events {
+    if ev.Op&fsnotify.Create != 0 { dispatch(ev.Name) }
+}
 ```
+
+### `chan struct{}` 当信号量 —— Go 习语
+
+这是 Go 里**最常见的并发上限模式**,值得单独看明白。
+
+**关键事实**:Go 的 buffered channel
+- `make(chan T, N)`:容量 N 的 channel
+- `ch <- x`:塞东西。**buffer 满时阻塞**,直到有人取
+- `<-ch`:取东西。buffer 空时阻塞,直到有人塞
+
+**用作信号量**:
+```go
+sem := make(chan struct{}, 2)    // 最多 2 个 slot
+```
+
+| 当前 channel buffer | 新来 `sem<-` 行为   |
+| ----------------- | --------------- |
+| 空 [_, _]           | 立刻成功,变 [x, _] |
+| 半满 [x, _]         | 立刻成功,变 [x, x] |
+| 满 [x, x]           | **阻塞**,等到有人 `<-sem` |
+
+每个想干活的 goroutine 先 `sem <- struct{}{}`(acquire,占 slot),干完 `<-sem`(release,腾 slot)。第三个来的会阻塞在 send 上,直到前两个里有一个完成 release。
+
+**`struct{}` 是空类型,占 0 字节** —— 不传任何数据,纯粹是"令牌"。等价于 Java 的 `Semaphore` 或 Python 的 `asyncio.Semaphore`,但 Go 直接用 channel 的阻塞语义实现,不需要专门的库。
+
+### `sync.Map.LoadOrStore` —— 原子合一
+
+朴素方式有 race:
+
+```go
+// 错误!两个 goroutine 同时进来都会 dispatch
+if _, exists := m[path]; !exists {
+    m[path] = struct{}{}     // ← 两个都到这一步,不互斥
+    spawnWork(path)
+}
+```
+
+`sync.Map.LoadOrStore(key, value)` 把 "查 + 没有就写" 做成**单步原子**:
+```
+返回 (existing, true)  -- key 已存在,什么都不变
+返回 (your value, false) -- key 不存在,刚刚写进去了
+```
+
+两个 goroutine 同时调,**保证只有一个拿到 false**。我们看到 false 就 dispatch,看到 true 就退出。这是为什么不需要 mutex。
 
 ### 关键不变量
 
-- **同一 story 不会被并行处理**(`inflight` 锁,基于 absolute path)
-- **全局并发上限 = `MaxParallel`**(`sem` channel buffer)
-- **单 story 内串行**(`RunOnce` 自己是同步函数)—— 跟 Cognition "single-threaded writes" 原则一致
+- ✅ 同一 story 不被并行处理(`inflight`)
+- ✅ 全局并发 ≤ `MaxParallel`(`sem` 容量)
+- ✅ 单 story 内串行(`RunOnce` 是同步函数,goroutine 内只调一次)—— 跟 Cognition "single-threaded writes" 原则一致
 
-### 🔍 易混点:为什么不用 mutex?
+### 🔍 易混点:`inflight` 是按 path 锁,不是按 storyId
 
-`sync.Map.LoadOrStore` 是原子的,本身就避免了 race。如果用 `Map[path] && Map[path]=true` 两步,两个 goroutine 可能都看到不存在然后都 store。
+如果你把 inbox 同一个 story 文件**改个名再 cp 进去**(`cp us-001.md us-001-v2.md`),它们的 path 不同,`inflight` 不会判重,会同时被 dispatch。
+
+但因为 `RunOnce` 内部按 `storyId`(frontmatter id 字段)算 worktree 路径和 state 文件,**第二个会撞第一个的 worktree**,出问题。
+
+实操中不会撞,因为 story 作者不会这么干。但严格说,我们的 inflight key 选 path 是个**便利但不严格**的选择。如果未来有"批量重命名 inbox 文件"的场景,要换成按 `storyId` 锁。
+
+### 🚩 踩坑记录:Semaphore 的 release 顺序
+
+我**自己写过一个**Semaphore class(struct + active 计数 + waiter 列表),长这样:
+
+```go
+// 第一版:有 race
+acquire():
+    if active < max { active++; return }
+    wait()       // 把自己塞进 waiters,挂起
+    active++     // ← 在 release 把我唤醒后再 ++
+
+release():
+    active--           // 先减
+    notifyOneWaiter()  // 后唤醒
+```
+
+**race 在哪**:`release()` 第一行 `active--`(从 max 变成 max-1),还没来得及唤醒 waiter,这时一个**新的** `acquire()` 进来:
+- 看到 `active < max` → 直接 `active++`(从 max-1 变 max),拿到 slot
+- 然后 `release` 那边唤醒 waiter,waiter 又 `active++` → **变成 max+1,超发**
+
+Node.js 单线程跑不会撞(整个流程在同一个 microtask 内),但 Go 多 goroutine **必撞**。
+
+**修法**:slot 在 release 时**不减**,而是直接交给 waiter("hand-off"):
+
+```go
+release():
+    if next := waiters.shift(); next != nil {
+        next()           // 我的 slot 直接给下一个,active 不变
+        return
+    }
+    active--             // 没人等,才真正释放
+```
+
+详见 commit `7704050` 的 Semaphore 节。
+
+**最终选 channel 方案的理由**:就是为了避开这种 race。`make(chan, N)` 的 buffer 满/空语义是 runtime 用 hchan 锁保证的,你不可能写错。**能用 channel 表达的并发,优先 channel,不要自己写计数器**。
 
 ### 🚩 踩坑记录:Semaphore 的 release 顺序
 
