@@ -65,12 +65,14 @@ type VerdictRecord struct {
 }
 
 type VerifierCommandRecord struct {
+	Tier       string `json:"tier,omitempty"` // "default" for flat-list stories; named tier otherwise
 	Cmd        string `json:"cmd"`
 	ExitCode   int    `json:"exitCode"`
 	DurationMs int64  `json:"durationMs"`
 	TimedOut   bool   `json:"timedOut"`
 	StdoutTail string `json:"stdoutTail"`
 	StderrTail string `json:"stderrTail"`
+	Skipped    bool   `json:"skipped,omitempty"` // true when an earlier tier failed and we skipped this one
 }
 
 type VerifierRecord struct {

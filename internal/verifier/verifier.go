@@ -31,19 +31,25 @@ type Options struct {
 	LogsDir         string
 }
 
-// Run executes the story's `verify:` commands (or DefaultCommands fallback).
+// Run executes the story's `verify:` tiers (or DefaultCommands fallback,
+// wrapped into a single "default" tier).
+//
+// Tiers run in declaration order with FAIL-FAST between tiers: as soon as
+// one tier has a failing command, all subsequent tiers are recorded as
+// Skipped without executing. Within a tier every command runs (so the
+// author sees every lint error at once, not just the first).
 //
 // TRUST MODEL: cmd strings come from the operator-controlled inbox or env
 // — treated as trusted shell input. Do NOT pipe untrusted content (PR
 // descriptions, web sources) into here without an allowlist.
 func Run(ctx context.Context, opts Options) (state.VerifierRecord, error) {
-	cmds := opts.Story.Frontmatter.Verify
-	if len(cmds) == 0 {
-		cmds = opts.DefaultCommands
+	tiers := opts.Story.Frontmatter.Verify
+	if len(tiers) == 0 && len(opts.DefaultCommands) > 0 {
+		tiers = []story.VerifyTier{{Name: "default", Commands: opts.DefaultCommands}}
 	}
 	start := time.Now()
 
-	if len(cmds) == 0 {
+	if len(tiers) == 0 {
 		return state.VerifierRecord{
 			Round:     opts.Round,
 			Skipped:   true,
@@ -53,20 +59,46 @@ func Run(ctx context.Context, opts Options) (state.VerifierRecord, error) {
 		}, nil
 	}
 
-	records := make([]state.VerifierCommandRecord, 0, len(cmds))
-	logChunks := make([]string, 0, len(cmds))
+	totalCmds := 0
+	for _, t := range tiers {
+		totalCmds += len(t.Commands)
+	}
+	records := make([]state.VerifierCommandRecord, 0, totalCmds)
+	logChunks := make([]string, 0, totalCmds)
 
-	for _, cmd := range cmds {
-		r, full := runOne(ctx, cmd, opts.TargetRepo, opts.Timeout)
-		records = append(records, r)
-		logChunks = append(logChunks,
-			fmt.Sprintf("$ %s\n[exit=%d%s duration=%dms]\n--- stdout ---\n%s\n--- stderr ---\n%s\n",
-				cmd, r.ExitCode, ifThen(r.TimedOut, " TIMEOUT", ""), r.DurationMs, full.Stdout, full.Stderr,
-			))
+	earlyFail := false
+	for _, tier := range tiers {
+		if earlyFail {
+			// Mark every command in this and subsequent tiers as skipped — we
+			// still want them visible in the record so feedback can mention
+			// "tier X was skipped because tier Y failed first".
+			for _, cmd := range tier.Commands {
+				records = append(records, state.VerifierCommandRecord{
+					Tier: tier.Name, Cmd: cmd, Skipped: true,
+				})
+			}
+			continue
+		}
+		for _, cmd := range tier.Commands {
+			r, full := runOne(ctx, cmd, opts.TargetRepo, opts.Timeout)
+			r.Tier = tier.Name
+			records = append(records, r)
+			logChunks = append(logChunks,
+				fmt.Sprintf("$ [%s] %s\n[exit=%d%s duration=%dms]\n--- stdout ---\n%s\n--- stderr ---\n%s\n",
+					tier.Name, cmd, r.ExitCode, ifThen(r.TimedOut, " TIMEOUT", ""), r.DurationMs, full.Stdout, full.Stderr,
+				))
+			if r.ExitCode != 0 {
+				earlyFail = true // 不立刻 break,先把本 tier 剩下的 cmd 也跑完
+			}
+		}
 	}
 
 	allPassed := true
 	for _, r := range records {
+		if r.Skipped {
+			allPassed = false
+			break
+		}
 		if r.ExitCode != 0 {
 			allPassed = false
 			break
@@ -175,6 +207,12 @@ func ifThen[T any](cond bool, yes, no T) T {
 
 // Summarize returns a one-block human/LLM-readable summary of the record,
 // suitable for feedback to the worker or for the Judge prompt.
+//
+// Convention: silent on success (one short OK line, no per-command output)
+// to keep judge prompt context clean — most rounds pass and dumping passing
+// command output every time both wastes tokens and dilutes the LLM's
+// attention from the diff. On failure, surface the first failed tier with
+// per-command excerpts so the next worker round has actionable feedback.
 func Summarize(v state.VerifierRecord) string {
 	if v.Skipped {
 		return "verifier skipped (no commands declared)"
@@ -182,21 +220,53 @@ func Summarize(v state.VerifierRecord) string {
 	if v.AllPassed {
 		return fmt.Sprintf("verifier OK (%d cmd, %dms)", len(v.Commands), v.WallMs)
 	}
-	failed := 0
+
+	// Find the first tier that failed; any tier after that is just Skipped.
+	failedTier := ""
+	for _, c := range v.Commands {
+		if !c.Skipped && c.ExitCode != 0 {
+			failedTier = c.Tier
+			break
+		}
+	}
+
+	failedCount := 0
+	skippedTiers := map[string]bool{}
 	var lines []string
 	for _, c := range v.Commands {
+		if c.Skipped {
+			skippedTiers[c.Tier] = true
+			continue
+		}
 		if c.ExitCode == 0 {
 			continue
 		}
-		failed++
+		failedCount++
 		excerpt := strings.TrimSpace(lastNLines(firstNonEmpty(c.StderrTail, c.StdoutTail), 6))
 		timeoutSuffix := ""
 		if c.TimedOut {
 			timeoutSuffix = " (timeout)"
 		}
-		lines = append(lines, fmt.Sprintf("  • `%s` exit=%d%s\n%s", c.Cmd, c.ExitCode, timeoutSuffix, excerpt))
+		tierTag := ""
+		if c.Tier != "" && c.Tier != "default" {
+			tierTag = fmt.Sprintf("[%s] ", c.Tier)
+		}
+		lines = append(lines, fmt.Sprintf("  • %s`%s` exit=%d%s\n%s", tierTag, c.Cmd, c.ExitCode, timeoutSuffix, excerpt))
 	}
-	return fmt.Sprintf("verifier FAIL (%d/%d cmd failed):\n%s", failed, len(v.Commands), strings.Join(lines, "\n"))
+
+	header := fmt.Sprintf("verifier FAIL (%d cmd failed", failedCount)
+	if failedTier != "" && failedTier != "default" {
+		header += fmt.Sprintf(" in tier %q", failedTier)
+	}
+	header += "):"
+	if len(skippedTiers) > 0 {
+		names := make([]string, 0, len(skippedTiers))
+		for n := range skippedTiers {
+			names = append(names, n)
+		}
+		header += fmt.Sprintf("\n  (subsequent tiers skipped: %s)", strings.Join(names, ", "))
+	}
+	return header + "\n" + strings.Join(lines, "\n")
 }
 
 func firstNonEmpty(a, b string) string {

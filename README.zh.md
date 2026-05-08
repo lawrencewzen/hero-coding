@@ -214,10 +214,29 @@ Frontmatter 字段:
 | `title` | 是 | 人类可读的标题 |
 | `priority` | 否 | `low` \| `normal` \| `high` (默认 `normal`) |
 | `max_retries` | 否 | 覆盖此 story 的 `MAX_RETRIES` |
-| `verify` | 否 | Verifier 每轮跑的 shell 命令 |
+| `verify` | 否 | Verifier 每轮跑的 shell 命令。可写成平铺 list(单 "default" tier)或有序 map(分层),见下面 |
 | `scope` | 否 | Glob 模式列表,auto-rescue commit 只 stage 这些路径(其它文件不动) |
 
 `Out of Scope` 跟 `Goal` 一样重要 —— 它防止 agent "顺手"重构无关代码。
+
+### 分层 `verify:`(推荐)
+
+平铺 list 每轮跑所有命令。**对大项目建议声明 named tier**,按声明顺序跑,**tier 间 fail-fast** —— 编译挂了不用浪费分钟级的 integration 测试:
+
+```yaml
+verify:
+  build:
+    - go build ./...
+  lint:
+    - go vet ./...
+    - golangci-lint run
+  unit:
+    - go test ./...
+  e2e:
+    - go test -tags=integration ./...
+```
+
+**tier 内**所有命令都跑(让作者一次看到所有 lint 错,不是只看第一个);**tier 间**只要一个 tier 有失败,后面的 tier 全部跳过。Judge prompt 上 PASS 时静默 —— 不会把每条成功命令的输出灌进 LLM context —— 所以分层不会膨胀 token。
 
 ## 目录结构
 

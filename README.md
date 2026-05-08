@@ -214,10 +214,29 @@ Frontmatter fields:
 | `title` | yes | Human-readable title |
 | `priority` | no | `low` \| `normal` \| `high` (default `normal`) |
 | `max_retries` | no | Overrides `MAX_RETRIES` env var for this story |
-| `verify` | no | Shell commands the Verifier runs after each round |
+| `verify` | no | Shell commands the Verifier runs after each round. Either a flat list (single "default" tier) or an ordered map of named tiers — see below |
 | `scope` | no | Glob patterns the auto-rescue commit will stage (others left untouched) |
 
 `Out of Scope` is as important as `Goal` — it stops the agent from "helpfully" refactoring unrelated code.
+
+### Layered `verify:` (recommended)
+
+A flat list runs every command on every round. For larger projects you can declare named tiers — they run in declaration order with **fail-fast between tiers**, so a broken build doesn't waste minutes of integration tests:
+
+```yaml
+verify:
+  build:
+    - go build ./...
+  lint:
+    - go vet ./...
+    - golangci-lint run
+  unit:
+    - go test ./...
+  e2e:
+    - go test -tags=integration ./...
+```
+
+Within a tier all commands still run (so the author sees every lint error at once, not just the first); between tiers the verifier short-circuits as soon as one tier has a failure. The Judge's prompt is silent on success — no per-command output is dumped when everything passes — so layering doesn't bloat the LLM context.
 
 ## Layout
 

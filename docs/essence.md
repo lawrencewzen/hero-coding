@@ -501,33 +501,76 @@ LLM 卡死的常见模式是 `bash("git status")` 调 4 遍想看不同结果。
 
 ---
 
-## 5. Verifier = 确定性的 shell runner
+## 5. Verifier = 确定性的 shell runner(分层 + fail-fast)
+
+### 数据形态:tier 列表
+
+`story.Frontmatter.Verify` 是 `[]VerifyTier`,每个 tier 一组命令。两种 YAML 形态都接受:
+
+```yaml
+# 形态 A:平铺 list → 包成单 "default" tier
+verify:
+  - go test ./...
+  - go vet ./...
+
+# 形态 B:有序 map → 多 tier,声明顺序保留
+verify:
+  build: [go build ./...]
+  lint: [go vet ./..., golangci-lint run]
+  unit: [go test ./...]
+  e2e:  [go test -tags=integration ./...]
+```
+
+### 执行规则(Codex / Augment 同款)
+
+- **tier 间 fail-fast**:tier N 任何一条命令失败,tier N+1 起整体 skip(record 仍写入,标记 Skipped)
+- **tier 内 run-to-completion**:同一 tier 的命令全部跑完,即便第 1 条已经红 —— 让作者一次看到所有 lint 错而非只看一个
+
+### 骨架(行内重注释)
 
 ```go
 func Run(ctx, opts) (VerifierRecord, error) {
-    // story.verify 优先;没写的话回落到 HERO_DEFAULT_VERIFY
-    cmds := opts.Story.Verify or opts.DefaultCommands
-    if len(cmds) == 0 { return Skipped }    // skip 不算失败,默认 PASS
+    tiers := opts.Story.Verify
+    if len(tiers) == 0 && len(opts.DefaultCommands) > 0 {
+        // HERO_DEFAULT_VERIFY 走这条:把 []string 包成单 "default" tier
+        tiers = []VerifyTier{{Name: "default", Commands: opts.DefaultCommands}}
+    }
+    if len(tiers) == 0 { return Skipped }    // skip 不算失败,默认 PASS
 
-    for _, cmd := range cmds {
-        // 关键:Setpgid → 把 sh 放进自己的进程组
-        // 否则超时只能杀直接子进程 sh,孙子(npm/node/...)成孤儿不死
-        c := exec.CommandContext(timeoutCtx, "sh", "-c", cmd)
-        c.Dir = worktree                    // cwd = 这个 story 的隔离 worktree
-        c.Env = os.Environ() + "CI=1"       // 让 npm/cargo 等关掉颜色和 prompt
-        c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-        // ... run, capture stdout/stderr, tail 到 4KB
-        if timeout {
-            kill(-pid, SIGKILL)             // 负 PID = 给整个进程组发信号
-            exitCode = 124
+    earlyFail := false
+    for _, tier := range tiers {
+        if earlyFail {
+            // 后续 tier 整体跳过,但每条 cmd 都生成一个 Skipped record
+            // 让 Summarize 能告诉 worker"unit 因为 lint 失败被跳过了"
+            for _, cmd := range tier.Commands {
+                records = append(records, {Tier: tier.Name, Cmd: cmd, Skipped: true})
+            }
+            continue
+        }
+        for _, cmd := range tier.Commands {
+            r := runOne(ctx, cmd, worktree, timeout)   // sh -c, Setpgid, tail 4KB
+            r.Tier = tier.Name
+            records = append(records, r)
+            if r.ExitCode != 0 {
+                earlyFail = true   // 不 break!本 tier 剩下的 cmd 还要跑(run-to-completion)
+            }
         }
     }
+    return VerifierRecord{ Commands: records, AllPassed: 全部非 Skipped 且 exit==0 }
+}
 
-    return VerifierRecord{
-        AllPassed: 所有 exit==0,
-        Commands:  []CommandRecord,         // 每条命令的 exit / 时长 / tail 输出
-        LogFile:   写完整输出到 runs/...-verify-r<n>.log,  // 给人看不给 LLM
+// 单条命令的执行:进程组管理 + tail
+func runOne(ctx, cmd, cwd, timeout) record {
+    c := exec.CommandContext(timeoutCtx, "sh", "-c", cmd)
+    c.Dir = cwd                                  // 这个 story 的隔离 worktree
+    c.Env = os.Environ() + "CI=1"                // 让 npm/cargo 关 color、关 prompt
+    c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}  // 关键!见下面
+    // run, capture stdout/stderr, tail 到 4KB
+    if timeout {
+        kill(-pid, SIGKILL)                      // 负 PID = 整个进程组
+        exitCode = 124
     }
+    return record
 }
 ```
 
@@ -567,6 +610,19 @@ exec.CommandContext("sh", "-c", "npm test")
 
 **有了 Setpgid**:sh 自成进程组(PGID = sh 的 PID),所有子孙默认继承。`kill(-pid, SIGKILL)` 给整个组发信号,**一次性全杀**。
 
+### 🔍 易混点:silent on success
+
+`Summarize()` 在 `AllPassed=true` 时**只输出一行** `verifier OK (N cmd, ms)`,不列任何 stdout。Judge prompt 里的 `formatVerifier()` 同理。
+
+为什么?多数 round 是过的,把每条 `go test exit=0 (122ms)` 灌进 judge context 是**纯浪费 token + 分散 LLM 注意力**(judge 本来该盯 diff 跟 story,不是过的命令)。FAIL 路径才详尽。
+
+### 🔍 易混点:Verifier 跟 Judge 的边界
+
+verifier 的输出是 **"go test exit=1"** 这种事实陈述。
+judge 的输出是 **"PASS / FAIL + 一段说明"** 这种判断。
+
+verifier 不说"这次构建失败,我建议 worker 重写测试" —— 那是 judge 的工作。verifier 只说"这条命令 exit 非 0",由 judge 决定要不要据此 FAIL 整个 round(目前实现是必然 FAIL,见 §6 短路逻辑)。
+
 ### 🚩 踩坑记录:为什么 verifier 不用 worker 的 bash 工具
 
 最初想:已经有 `bash` 工具了,verifier 直接调它不就行了?
@@ -583,17 +639,47 @@ exec.CommandContext("sh", "-c", "npm test")
 
 强行复用 = 强行套一层 agent infrastructure 来跑 `go test`,白白增加 LLM 调用、guardrails 上下文,**输出还得反向截断给非 LLM 消费**。纯亏。
 
-### 🔍 易混点:Verifier 跟 Judge 的边界
+### 信任模型(代码注释里写死的)
 
-verifier 的输出是 **"go test exit=1"** 这种事实陈述。
-judge 的输出是 **"PASS / FAIL + 一段说明"** 这种判断。
+`cmd` 来自 operator 控制的 inbox 或 env,**当作开发者自己手敲**的 shell 输入。绝对不能把 PR 描述、网页内容这类不可信输入接进来。
 
-verifier 不说"这次构建失败,我建议 worker 重写测试" —— 那是 judge 的工作。verifier 只说"这条命令 exit 非 0",由 judge 决定要不要据此 FAIL 整个 round(目前实现是必然 FAIL,见 §6 短路逻辑)。
+### 为什么 shell 不直接 argv?
+
+verify 命令是 story 作者写的开放输入,常出现:
+
+```yaml
+verify:
+  - go test ./... && go vet ./...   # ← shell 操作符
+  - pytest -k 'test_x or test_y'    # ← 引号
+  - cd subdir && make               # ← 复合命令
+```
+
+不用 `sh -c` 就要自己写 shell parser。**直接复用 /bin/sh = 跟 GitHub Actions、npm scripts、Makefile 同一个选择**。
+
+### 为什么 Setpgid + 负 PID kill?
+
+```
+exec.CommandContext("sh", "-c", "npm test")
+        │ spawns
+        ▼
+       sh                  ← Go stdlib 只杀这个
+        │ spawns
+        ▼
+       npm                 ← 这个不会被杀,变孤儿
+        │ spawns
+        ▼
+       node + workers       ← 这些更不会
+```
+
+**没有 Setpgid 时**:超时只杀 sh,孙子全留下来吃 CPU、占端口、锁文件,下一次 verify 直接被它们搞死。
+
+**有了 Setpgid**:sh 自成进程组(PGID = sh 的 PID),所有子孙默认继承。`kill(-pid, SIGKILL)` 给整个组发信号,**一次性全杀**。
 
 ### 🔗 跨节
 
 - 命令来源、HERO_DEFAULT_VERIFY 见 §2 末尾"踩坑记录"
 - 短路逻辑见 §6
+- 行业横向对比(Aider / SWE-agent / OpenHands / Codex / Augment / Claude Code)见 `docs/verify-survey-2026.md`(若存在)
 
 ---
 
@@ -995,22 +1081,22 @@ release():
 
 ## 词汇表
 
-| 术语                          | 含义                                                            |
-| --------------------------- | ------------------------------------------------------------- |
-| **PEV**                     | Plan-Execute-Verify;hero-coding 是其简化版,Plan 在外           |
-| **ReAct**                   | LLM 边推理边调工具的 loop 模式(reasoning + acting 交替)              |
-| **Role**                    | 一个 LLM 配置 slot:system prompt + allowed tools + 可选 model 覆盖 |
-| **Provider**                | 一个 LLM endpoint:BaseURL + APIKey + 可选 InsecureTLS         |
-| **Binding**                 | `<provider>/<model>` 短字符串,把 role 绑到具体连接                    |
-| **Schema 层限工具**           | 让被禁工具不出现在 LLM 的 tools[] 列表里(物理隔离)                       |
-| **Runtime guardrail**       | 工具调用执行前拦截的兜底(loop / cap / violation)                        |
-| **Defense-in-depth**        | 4 层独立防御:prompt / schema / runtime / tool sandbox            |
-| **autoRescueCommit**        | Dispatcher 在 worker 结束后兜底 commit dirty file 的机制             |
-| **Setpgid**                 | Unix 系统调用,把进程放入新进程组,便于 kill 整组                        |
-| **negative PID kill**       | `kill(-pid, signal)` 给整个进程组发信号                              |
-| **resume**                  | 从 `FinalStatus="running"` 的 state 文件继续上次跑到一半的 round        |
-| **short-circuit (judge)**   | verifier 红灯时跳过 LLM 直接 FAIL                                    |
-| **filesystem-as-context**   | 用通用 bash/read/edit/grep 五件套,而非特化 ACI                        |
+| 术语                        | 含义                                                         |
+| ------------------------- | ---------------------------------------------------------- |
+| **PEV**                   | Plan-Execute-Verify;hero-coding 是其简化版,Plan 在外              |
+| **ReAct**                 | LLM 边推理边调工具的 loop 模式(reasoning + acting 交替)                |
+| **Role**                  | 一个 LLM 配置 slot:system prompt + allowed tools + 可选 model 覆盖 |
+| **Provider**              | 一个 LLM endpoint:BaseURL + APIKey + 可选 InsecureTLS          |
+| **Binding**               | `<provider>/<model>` 短字符串,把 role 绑到具体连接                    |
+| **Schema 层限工具**           | 让被禁工具不出现在 LLM 的 tools[] 列表里(物理隔离)                          |
+| **Runtime guardrail**     | 工具调用执行前拦截的兜底(loop / cap / violation)                       |
+| **Defense-in-depth**      | 4 层独立防御:prompt / schema / runtime / tool sandbox           |
+| **autoRescueCommit**      | Dispatcher 在 worker 结束后兜底 commit dirty file 的机制            |
+| **Setpgid**               | Unix 系统调用,把进程放入新进程组,便于 kill 整组                             |
+| **negative PID kill**     | `kill(-pid, signal)` 给整个进程组发信号                             |
+| **resume**                | 从 `FinalStatus="running"` 的 state 文件继续上次跑到一半的 round        |
+| **short-circuit (judge)** | verifier 红灯时跳过 LLM 直接 FAIL                                 |
+| **filesystem-as-context** | 用通用 bash/read/edit/grep 五件套,而非特化 ACI                       |
 
 ---
 

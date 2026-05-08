@@ -26,27 +26,40 @@ const (
 	PriorityHigh   Priority = "high"
 )
 
-// Frontmatter is the typed form of the story's YAML header.
-type Frontmatter struct {
-	ID         string   `yaml:"id"`
-	Title      string   `yaml:"title"`
-	Created    string   `yaml:"-"` // populated from rawCreated below (string or time.Time)
-	Priority   Priority `yaml:"priority"`
-	MaxRetries *int     `yaml:"max_retries"`
-	Verify     []string `yaml:"verify"`
-	Scope      []string `yaml:"scope"`
+// VerifyTier is one stage of the layered verifier pipeline. Tiers run in
+// declaration order; commands within a tier all execute, but if any tier
+// has a failing command, subsequent tiers are skipped (fail-fast across
+// tiers, run-to-completion within a tier — same as Codex / Augment).
+//
+// The default name "default" is used when a story declares verify as a
+// flat list, so a single-tier setup is just a list with no map syntax.
+type VerifyTier struct {
+	Name     string
+	Commands []string
 }
 
-// rawFrontmatter is the wire-form used during YAML decoding so we can accept
-// either an ISO string or a YAML date for `created`.
+// Frontmatter is the typed form of the story's YAML header.
+type Frontmatter struct {
+	ID         string       `yaml:"id"`
+	Title      string       `yaml:"title"`
+	Created    string       // populated from rawCreated (string or time.Time)
+	Priority   Priority     `yaml:"priority"`
+	MaxRetries *int         `yaml:"max_retries"`
+	Verify     []VerifyTier // parsed from either a flat list or an ordered map
+	Scope      []string     `yaml:"scope"`
+}
+
+// rawFrontmatter is the wire-form used during YAML decoding. `Verify` is a
+// raw yaml.Node so we can dispatch on Kind (sequence = flat list,
+// mapping = ordered tier map). `Created` accepts string or time.Time.
 type rawFrontmatter struct {
-	ID         string   `yaml:"id"`
-	Title      string   `yaml:"title"`
-	Created    any      `yaml:"created"`
-	Priority   string   `yaml:"priority"`
-	MaxRetries *int     `yaml:"max_retries"`
-	Verify     []string `yaml:"verify"`
-	Scope      []string `yaml:"scope"`
+	ID         string    `yaml:"id"`
+	Title      string    `yaml:"title"`
+	Created    any       `yaml:"created"`
+	Priority   string    `yaml:"priority"`
+	MaxRetries *int      `yaml:"max_retries"`
+	Verify     yaml.Node `yaml:"verify"`
+	Scope      []string  `yaml:"scope"`
 }
 
 // Story is a parsed user story file.
@@ -119,10 +132,9 @@ func normalize(r rawFrontmatter) (Frontmatter, error) {
 	if r.MaxRetries != nil && *r.MaxRetries < 0 {
 		return Frontmatter{}, fmt.Errorf("frontmatter.max_retries must be non-negative")
 	}
-	for i, v := range r.Verify {
-		if strings.TrimSpace(v) == "" {
-			return Frontmatter{}, fmt.Errorf("frontmatter.verify[%d] must be non-empty", i)
-		}
+	verify, err := parseVerify(r.Verify)
+	if err != nil {
+		return Frontmatter{}, fmt.Errorf("frontmatter.verify: %w", err)
 	}
 	for i, v := range r.Scope {
 		if strings.TrimSpace(v) == "" {
@@ -147,9 +159,70 @@ func normalize(r rawFrontmatter) (Frontmatter, error) {
 		Created:    created,
 		Priority:   prio,
 		MaxRetries: r.MaxRetries,
-		Verify:     r.Verify,
+		Verify:     verify,
 		Scope:      r.Scope,
 	}, nil
+}
+
+// parseVerify accepts either:
+//   - a flat YAML list of commands: ["go test ./...", "go vet ./..."]
+//     → wrapped into a single tier named "default"
+//   - an ordered YAML map of tier name → commands:
+//     {typecheck: [...], lint: [...], unit: [...]}
+//     → preserved in declaration order
+//
+// Empty / missing verify returns nil so the dispatcher can decide whether
+// to fall back to HERO_DEFAULT_VERIFY.
+func parseVerify(n yaml.Node) ([]VerifyTier, error) {
+	if n.Kind == 0 {
+		return nil, nil
+	}
+	switch n.Kind {
+	case yaml.SequenceNode:
+		var cmds []string
+		if err := n.Decode(&cmds); err != nil {
+			return nil, fmt.Errorf("must be a list of strings: %w", err)
+		}
+		if len(cmds) == 0 {
+			return nil, nil
+		}
+		for i, c := range cmds {
+			if strings.TrimSpace(c) == "" {
+				return nil, fmt.Errorf("[%d] must be non-empty", i)
+			}
+		}
+		return []VerifyTier{{Name: "default", Commands: cmds}}, nil
+	case yaml.MappingNode:
+		// yaml.Node.Content for mappings is [key0, val0, key1, val1, ...] in
+		// declaration order, which is exactly what we need for tier ordering.
+		tiers := make([]VerifyTier, 0, len(n.Content)/2)
+		for i := 0; i < len(n.Content); i += 2 {
+			key, val := n.Content[i], n.Content[i+1]
+			if key.Kind != yaml.ScalarNode {
+				return nil, fmt.Errorf("tier name at position %d must be a string", i/2)
+			}
+			name := strings.TrimSpace(key.Value)
+			if name == "" {
+				return nil, fmt.Errorf("tier name at position %d is empty", i/2)
+			}
+			var cmds []string
+			if err := val.Decode(&cmds); err != nil {
+				return nil, fmt.Errorf("tier %q: must be a list of strings: %w", name, err)
+			}
+			if len(cmds) == 0 {
+				return nil, fmt.Errorf("tier %q: must have at least one command", name)
+			}
+			for j, c := range cmds {
+				if strings.TrimSpace(c) == "" {
+					return nil, fmt.Errorf("tier %q [%d] must be non-empty", name, j)
+				}
+			}
+			tiers = append(tiers, VerifyTier{Name: name, Commands: cmds})
+		}
+		return tiers, nil
+	default:
+		return nil, fmt.Errorf("must be a list of commands or a map of tiered command lists")
+	}
 }
 
 // splitFrontmatter splits a YAML-frontmatter markdown file into the YAML

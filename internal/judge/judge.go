@@ -150,21 +150,36 @@ func extractText(content any) string {
 	}
 }
 
+// formatVerifier produces the verifier block for the Judge's prompt.
+// Because Run() short-circuits on verifier failure, this function only
+// ever sees Skipped or AllPassed records. We collapse passing runs to a
+// single line to keep the Judge's context clean — most rounds pass and
+// listing every passing command burns tokens without changing the verdict.
 func formatVerifier(v state.VerifierRecord) string {
 	if v.Skipped {
 		return "(no verifier commands declared — judging on diff alone)"
 	}
-	head := fmt.Sprintf("All passed: %v | wall: %dms", v.AllPassed, v.WallMs)
-	lines := make([]string, 0, len(v.Commands))
-	for _, c := range v.Commands {
-		base := fmt.Sprintf("- `%s` exit=%d duration=%dms%s", c.Cmd, c.ExitCode, c.DurationMs, ifThen(c.TimedOut, " TIMEOUT", ""))
-		if c.ExitCode == 0 {
-			lines = append(lines, base)
+	tiers := tierNamesInOrder(v.Commands)
+	if len(tiers) == 1 && tiers[0] == "default" {
+		return fmt.Sprintf("verifier OK (%d cmd, %dms)", len(v.Commands), v.WallMs)
+	}
+	return fmt.Sprintf("verifier OK (%d cmd across tiers %s, %dms)",
+		len(v.Commands), strings.Join(tiers, " → "), v.WallMs)
+}
+
+// tierNamesInOrder returns each distinct Tier value in first-seen order,
+// matching the declaration order in the story.
+func tierNamesInOrder(cmds []state.VerifierCommandRecord) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, 4)
+	for _, c := range cmds {
+		if c.Tier == "" || seen[c.Tier] {
 			continue
 		}
-		lines = append(lines, fmt.Sprintf("%s\n  stderr tail:\n%s\n  stdout tail:\n%s", base, lastChars(c.StderrTail, 1500), lastChars(c.StdoutTail, 1500)))
+		seen[c.Tier] = true
+		out = append(out, c.Tier)
 	}
-	return head + "\n" + strings.Join(lines, "\n")
+	return out
 }
 
 func collectGitContext(ctx context.Context, repo, baseRef string) (string, error) {
@@ -219,16 +234,3 @@ func truncate(s string, n int) string {
 	return s[:n]
 }
 
-func lastChars(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[len(s)-n:]
-}
-
-func ifThen[T any](cond bool, yes, no T) T {
-	if cond {
-		return yes
-	}
-	return no
-}
