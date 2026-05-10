@@ -109,7 +109,7 @@ func rescueDirtyTree(ctx context.Context, repo string) (bool, error) {
 }
 
 // autoRescueCommit commits any uncommitted changes the worker left behind so
-// the Judge can see them. Honours `scope` if set: only files under those
+// the Reviewer can see them. Honours `scope` if set: only files under those
 // patterns are staged, and we bail if nothing in scope is dirty.
 func autoRescueCommit(ctx context.Context, repo string, round int, scope []string) (bool, error) {
 	out, err := git(ctx, repo, "status", "--porcelain")

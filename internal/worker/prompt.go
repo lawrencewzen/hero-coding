@@ -30,7 +30,7 @@ func buildUserPrompt(s *story.Story, captainFeedback string) string {
 		s.Body,
 		"",
 		"---",
-		"Previous attempt was rejected by Judge. Address this in this round:",
+		"Previous round had Reviewer changes requested. Address them this round:",
 		captainFeedback,
 	}, "\n")
 }

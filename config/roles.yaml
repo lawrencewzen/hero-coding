@@ -1,5 +1,5 @@
 # Role assignment + runtime knobs.
-# Switch worker/judge models by changing `provider` here — provider names
+# Switch worker/reviewer models by changing `provider` here — provider names
 # come from the filenames (without .yaml) under config/providers/.
 
 worker:
@@ -8,8 +8,9 @@ worker:
   # model: inclusionai/ring-2.6-1t:free
   # reasoning_effort: xhigh
 
-judge:
+reviewer:
   provider: ring
+  # reasoning_effort: xhigh   # Reviewer benefits from deeper reasoning when auditing the diff
 
 # Where Hero Coding will run stories. Relative paths resolve against the
 # project root (where you run `hero` from).

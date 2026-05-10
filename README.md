@@ -8,7 +8,7 @@ A minimal harness for autonomous coding agents. Drop a user story in `inbox/`, g
 
 **The harness is the thinking layer. The agent is a replaceable executor.**
 
-Reasoning lives in the loop, not in the weights. A non-reasoning model running inside a harness with dispatcher, verifier, judge, and guardrails behaves like a reasoning system as a whole — focused on the task, caught when it strays, retried with concrete feedback.
+Reasoning lives in the loop, not in the weights. A non-reasoning model running inside a harness with dispatcher, verifier, reviewer, and guardrails behaves like a reasoning system as a whole — focused on the task, caught when it strays, retried with concrete feedback.
 
 ## Architecture
 
@@ -27,7 +27,7 @@ inbox/us-001.md
    │   Verifier ── runs the story's `verify:`      │
    │     │        commands (tests / lint / type)   │
    │     ▼                                         │
-   │   Judge    ── reads story + verifier output   │
+   │   Reviewer ── reads story + verifier output   │
    │              + git diff, returns PASS / FAIL  │
    │                                               │
    └─────────────────┬─────────────────────────────┘
@@ -48,12 +48,12 @@ user ⇄ Claude Code / Codex          hero-coding
   │       (Plan)                      (Execute + Verify)
   │                                       │
   ▼                                       ▼
-  story.md  ─────  inbox/  ─────►  worker → verifier → judge → done/
+  story.md  ─────  inbox/  ─────►  worker → verifier → reviewer → done/
 ```
 
-The story is the **contract** between Plan and Execute — written down so the Judge can reference it, the Verifier can test it, and retries can replay against the same target. Conversational agents are good at clarifying and iterating; hero-coding is good at long-running deterministic execution. Each does what it's best at.
+The story is the **contract** between Plan and Execute — written down so the Reviewer can reference it, the Verifier can test it, and retries can replay against the same target. Conversational agents are good at clarifying and iterating; hero-coding is good at long-running deterministic execution. Each does what it's best at.
 
-The Verifier produces deterministic evidence (test exit codes); the Judge reads the verifier record + git diff before deciding. Verifier failure short-circuits to FAIL without burning a Judge LLM call.
+The Verifier produces deterministic evidence (test exit codes); the Reviewer reads the verifier record + git diff before deciding. Verifier failure short-circuits to CHANGES_REQUESTED without burning a Reviewer LLM call.
 
 ## How It Works
 
@@ -85,28 +85,32 @@ The worker's behaviour is configured by a **Role** — system prompt + allowed-t
 | Tool-call cap | 80 calls in one round | Kill round |
 | Wall-time cap | 5 minutes | Kill round |
 | Loop detection | Same tool+args ≥4× in 6-call window | Kill round |
-| Auto-rescue commit | Worker edited files but forgot to `git commit` | Dispatcher commits in-scope changes so Judge can see them |
+| Auto-rescue commit | Worker edited files but forgot to `git commit` | Dispatcher commits in-scope changes so Reviewer can see them |
 
 ### Verifier
 
 Runs the story's `verify:` shell commands (or the `default_verify` fallback from `roles.yaml`) inside the worktree with a per-command timeout and CI=1 in env. Stdout/stderr are captured and tailed; full output goes to `runs/<id>-<ts>-verify-r<n>.log`.
 
-The Verifier is authoritative on its checks. If any command exits non-zero, the round short-circuits to FAIL without calling the Judge LLM.
+The Verifier is authoritative on its checks. If any command exits non-zero, the round short-circuits to CHANGES_REQUESTED without calling the Reviewer LLM.
 
-### Judge (Role)
+### Reviewer (Role)
 
 Reads the user story, the Verifier record, and `git log` + `git diff` since the base ref. Calls an OpenAI-compatible Chat Completions endpoint with `response_format: json_object` and returns:
 
 ```json
-{"verdict": "PASS", "reason": "…"}
-{"verdict": "FAIL", "reason": "concrete, actionable feedback for next round"}
+{
+  "verdict": "APPROVED" | "CHANGES_REQUESTED",
+  "summary": "<one paragraph>",
+  "ac_check": [{"ac": "...", "satisfied": true|false, "commit": "..."}],
+  "comments": [{"file": "...", "line": N, "severity": "blocker"|"nit", "comment": "..."}]
+}
 ```
 
-The Judge fails a round if any Acceptance Criterion isn't visibly satisfied, scope was violated, or the verifier was red. Its reason is appended to the story file (`## Captain Feedback (auto)`) so the next Worker round sees it.
+The Reviewer marks CHANGES_REQUESTED for a round if any Acceptance Criterion isn't visibly satisfied, scope was violated, or the verifier was red. Its reason is appended to the story file (`## Reviewer Feedback (auto)`) so the next Worker round sees it.
 
-### Worker / Judge use independent models
+### Worker / Reviewer use independent models
 
-Worker and Judge each pick a provider in `config/roles.yaml`. They can share one provider, or point at completely different endpoints. See [Configuration](#configuration) below.
+Worker and Reviewer each pick a provider in `config/roles.yaml`. They can share one provider, or point at completely different endpoints. See [Configuration](#configuration) below.
 
 ## Quick Start
 
@@ -117,7 +121,7 @@ go build -o hero ./cmd/hero
 # 2. Configure
 cp config.local.yaml.example config.local.yaml
 # edit config.local.yaml: paste your API key(s)
-# edit config/roles.yaml:  pick worker/judge providers + target_repo
+# edit config/roles.yaml:  pick worker/reviewer providers + target_repo
 
 # 3. Drop a story
 cp examples/stories/us-001.md inbox/
@@ -137,7 +141,7 @@ config/
     ring.yaml          # one file per LLM provider (no secrets, git-tracked)
     gpt-5.yaml
     ...
-  roles.yaml           # which provider plays worker/judge + runtime knobs
+  roles.yaml           # which provider plays worker/reviewer + runtime knobs
 config.local.yaml      # API keys (gitignored — copy from .example)
 ```
 
@@ -170,7 +174,7 @@ worker:
   # model: inclusionai/ring-2.6-1t:free
   # reasoning_effort: xhigh
 
-judge:
+reviewer:
   provider: ring         # or point at a different provider for an independent verdict
 
 target_repo: examples/target-repo
@@ -188,7 +192,7 @@ target_repo: examples/target-repo
 |---|---|
 | Swap worker model on the same provider | uncomment + edit `worker.model` in `roles.yaml` |
 | Swap worker to a different provider | edit `worker.provider` in `roles.yaml` |
-| Cheap worker + strong judge | use different `provider` for each role |
+| Cheap worker + strong reviewer | use different `provider` for each role |
 | Add a new endpoint | drop a new `config/providers/<name>.yaml` + add `keys.<name>` in `config.local.yaml` |
 | Switch reasoning effort | edit `default_reasoning_effort` (provider) or `reasoning_effort` (role) |
 
@@ -242,7 +246,7 @@ Configuration is loaded **once at process startup** and frozen into each Worker'
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-Worker and Judge each go through `LLMFor` independently, so they can sit on different providers within the same process. There is also a third (Go-level) model-override hook in `worker.New` via `role.Role.Model`, which lets future code pick a model per story without touching YAML.
+Worker and Reviewer each go through `LLMFor` independently, so they can sit on different providers within the same process. There is also a third (Go-level) model-override hook in `worker.New` via `role.Role.Model`, which lets future code pick a model per story without touching YAML.
 
 ## User Story Format
 
@@ -308,7 +312,7 @@ verify:
     - go test -tags=integration ./...
 ```
 
-Within a tier all commands still run (so the author sees every lint error at once, not just the first); between tiers the verifier short-circuits as soon as one tier has a failure. The Judge's prompt is silent on success — no per-command output is dumped when everything passes — so layering doesn't bloat the LLM context.
+Within a tier all commands still run (so the author sees every lint error at once, not just the first); between tiers the verifier short-circuits as soon as one tier has a failure. The Reviewer's prompt is silent on success — no per-command output is dumped when everything passes — so layering doesn't bloat the LLM context.
 
 ## Layout
 
@@ -319,11 +323,11 @@ internal/
   agent/                   OpenAI-compatible Chat Completions client
   config/                  YAML loader + per-role LLM resolution
   dispatcher/              orchestrator + git worktree mgmt + inbox watcher
-  judge/                   PEV verdict (verifier short-circuit + LLM)
+  reviewer/                code-review verdict (verifier short-circuit + LLM)
   logging/                 slog helpers
   role/                    Role abstraction (system prompt + allowed tools + model)
   state/                   per-story persistent stats (atomic JSON)
-  story/                   frontmatter parser + judge-feedback appender
+  story/                   frontmatter parser + reviewer-feedback appender
   tooldef/                 Tool interface
   tools/                   bash, read_file, write_file, edit_file, grep, find, ls, read_tracker
   verifier/                deterministic shell-command runner

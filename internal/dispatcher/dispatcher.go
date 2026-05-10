@@ -1,5 +1,5 @@
 // Package dispatcher orchestrates one or more user-story rounds:
-// worker → verifier → judge, with worktree management and resumable state.
+// worker → verifier → reviewer, with worktree management and resumable state.
 package dispatcher
 
 import (
@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"hero-coding/internal/config"
-	"hero-coding/internal/judge"
+	"hero-coding/internal/reviewer"
 	"hero-coding/internal/role"
 	"hero-coding/internal/state"
 	"hero-coding/internal/story"
@@ -48,13 +48,13 @@ func DefaultPaths(root string) Paths {
 
 // Dispatcher executes stories. Construct once, reuse across stories.
 type Dispatcher struct {
-	cfg       *config.Config
-	paths     Paths
-	roles     role.Roles
-	worker    *worker.Worker
-	workerCfg config.LLMConfig
-	judgeCfg  config.LLMConfig
-	log       *slog.Logger
+	cfg         *config.Config
+	paths       Paths
+	roles       role.Roles
+	worker      *worker.Worker
+	workerCfg   config.LLMConfig
+	reviewerCfg config.LLMConfig
+	log         *slog.Logger
 }
 
 // New builds a Dispatcher using role.Defaults(). Use NewWithRoles to
@@ -69,18 +69,18 @@ func NewWithRoles(cfg *config.Config, paths Paths, roles role.Roles) (*Dispatche
 	if err != nil {
 		return nil, err
 	}
-	judgeCfg, err := cfg.LLMFor("judge")
+	reviewerCfg, err := cfg.LLMFor("reviewer")
 	if err != nil {
 		return nil, err
 	}
 	return &Dispatcher{
-		cfg:       cfg,
-		paths:     paths,
-		roles:     roles,
-		worker:    worker.New(workerCfg, roles.Worker),
-		workerCfg: workerCfg,
-		judgeCfg:  judgeCfg,
-		log:       slog.Default(),
+		cfg:         cfg,
+		paths:       paths,
+		roles:       roles,
+		worker:      worker.New(workerCfg, roles.Worker),
+		workerCfg:   workerCfg,
+		reviewerCfg: reviewerCfg,
+		log:         slog.Default(),
 	}, nil
 }
 
@@ -152,9 +152,9 @@ func (d *Dispatcher) RunOnce(ctx context.Context, storyPath string) (*state.Stat
 		}
 		baseSha = prior.BaseSha
 		worktreePath = prior.WorktreePath
-		startRound = len(prior.Verdicts) + 1
-		if len(prior.Verdicts) > 0 {
-			lastFeedback = prior.Verdicts[len(prior.Verdicts)-1].Reason
+		startRound = len(prior.Reviews) + 1
+		if len(prior.Reviews) > 0 {
+			lastFeedback = prior.Reviews[len(prior.Reviews)-1].Summary
 		}
 		d.log.Info("resuming story", "id", sid, "from_round", startRound)
 
@@ -190,11 +190,11 @@ func (d *Dispatcher) RunOnce(ctx context.Context, storyPath string) (*state.Stat
 			Branch: branch, BaseRef: d.cfg.Target.BaseRef, BaseSha: baseSha,
 			WorktreePath: worktreePath,
 			Worker:       state.WorkerRef{BaseURL: d.workerCfg.BaseURL, Model: d.workerCfg.Model},
-			Judge:        state.JudgeRef{BaseURL: d.judgeCfg.BaseURL, Model: d.judgeCfg.Model},
+			Reviewer:     state.ReviewerRef{BaseURL: d.reviewerCfg.BaseURL, Model: d.reviewerCfg.Model},
 			StartedAt:    state.NowISO(),
 			WorkerRuns:   []state.WorkerRunStats{},
 			Verifications: []state.VerifierRecord{},
-			Verdicts:     []state.VerdictRecord{},
+			Reviews:      []state.ReviewRecord{},
 			FinalStatus:  "running",
 		}
 		if err := state.Write(d.paths.StateDir, storyKey, stats); err != nil {
@@ -235,32 +235,33 @@ func (d *Dispatcher) RunOnce(ctx context.Context, storyPath string) (*state.Stat
 		}
 		stats.Verifications = append(stats.Verifications, v)
 
-		jv, err := judge.Run(ctx, judge.Options{
-			Story: s, Judge: d.judgeCfg, Role: d.roles.Judge,
+		rv, err := reviewer.Run(ctx, reviewer.Options{
+			Story: s, Reviewer: d.reviewerCfg, Role: d.roles.Reviewer,
 			TargetRepo: worktreePath,
 			BaseRef:    baseSha, Round: round, Verifier: v,
 		})
 		if err != nil {
-			return stats, fmt.Errorf("judge round %d: %w", round, err)
+			return stats, fmt.Errorf("reviewer round %d: %w", round, err)
 		}
-		stats.Verdicts = append(stats.Verdicts, jv)
-		d.log.Info("judge", "verdict", jv.Verdict, "reason", truncate(jv.Reason, 120))
+		stats.Reviews = append(stats.Reviews, rv)
+		d.log.Info("reviewer", "verdict", rv.Verdict, "summary", truncate(rv.Summary, 120))
 
-		if jv.Verdict == "FAIL" {
-			feedback := jv.Reason
-			if !v.Skipped {
-				feedback = jv.Reason + "\n\n" + verifier.Summarize(v)
+		if rv.Verdict == state.VerdictChangesRequested {
+			feedback := reviewer.FormatFeedback(rv)
+			if !v.Skipped && rv.ShortCircuited {
+				// Verifier short-circuit: surface the failed-test summary directly.
+				feedback = rv.Summary + "\n\n" + verifier.Summarize(v)
 			}
 			lastFeedback = feedback
-			if err := story.AppendJudgeFeedback(storyPath, round, feedback); err != nil {
-				d.log.Warn("append judge feedback failed", "err", err)
+			if err := story.AppendReviewerFeedback(storyPath, round, feedback); err != nil {
+				d.log.Warn("append reviewer feedback failed", "err", err)
 			}
 		}
 		commits, _ := countCommits(ctx, worktreePath, baseSha)
 		stats.Commits = commits
 		_ = state.Write(d.paths.StateDir, storyKey, stats)
 
-		if jv.Verdict == "PASS" {
+		if rv.Verdict == state.VerdictApproved {
 			stats.FinalStatus = "done"
 			break
 		}

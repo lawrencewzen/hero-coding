@@ -8,7 +8,7 @@
 
 **Harness 是思考层,agent 是可替换的执行器。**
 
-推理能力不必长在模型权重里 —— 长在 loop 里也行。一个非推理模型嵌进带 dispatcher / verifier / judge / guardrails 的 harness,整个系统对外就表现为一个能"想清楚"的工程师:目标聚焦、跑偏被抓、失败有具体反馈再重试。
+推理能力不必长在模型权重里 —— 长在 loop 里也行。一个非推理模型嵌进带 dispatcher / verifier / reviewer / guardrails 的 harness,整个系统对外就表现为一个能"想清楚"的工程师:目标聚焦、跑偏被抓、失败有具体反馈再重试。
 
 ## 架构
 
@@ -27,7 +27,7 @@ inbox/us-001.md
    │   Verifier ── 跑 story 里 `verify:` 声明的     │
    │     │        命令(测试 / lint / typecheck)    │
    │     ▼                                         │
-   │   Judge    ── 读 story + verifier 输出 +      │
+   │   Reviewer ── 读 story + verifier 输出 +      │
    │              git diff,返回 PASS / FAIL        │
    │                                               │
    └─────────────────┬─────────────────────────────┘
@@ -48,12 +48,12 @@ user ⇄ Claude Code / Codex          hero-coding
   │       (Plan)                      (Execute + Verify)
   │                                       │
   ▼                                       ▼
-  story.md  ─────  inbox/  ─────►  worker → verifier → judge → done/
+  story.md  ─────  inbox/  ─────►  worker → verifier → reviewer → done/
 ```
 
-Story 是 Plan 与 Execute 之间的**契约** —— 写下来才能被 Judge 引用、被 Verifier 测、被多次 retry 复用。对话式 agent 擅长澄清和迭代,hero-coding 擅长长跑式确定性执行。各做各擅长的事。
+Story 是 Plan 与 Execute 之间的**契约** —— 写下来才能被 Reviewer 引用、被 Verifier 测、被多次 retry 复用。对话式 agent 擅长澄清和迭代,hero-coding 擅长长跑式确定性执行。各做各擅长的事。
 
-Verifier 产出确定性证据(命令退出码),Judge 看 verifier 记录 + git diff 之后再判决。Verifier 失败时直接短路成 FAIL,不会浪费一次 Judge LLM 调用。
+Verifier 产出确定性证据(命令退出码),Reviewer 看 verifier 记录 + git diff 之后再判决。Verifier 失败时直接短路成 CHANGES_REQUESTED,不会浪费一次 Reviewer LLM 调用。
 
 ## 工作机制
 
@@ -85,28 +85,32 @@ Worker 的行为通过 **Role** 配置 —— system prompt + 工具白名单 + 
 | 工具调用上限 | 一轮 80 次 | 杀掉这一轮 |
 | 墙时间上限 | 5 分钟 | 杀掉这一轮 |
 | 循环检测 | 同样 tool+args 在 6 次窗口内出现 ≥4 次 | 杀掉这一轮 |
-| 自动 rescue commit | Worker 改了文件但忘记 `git commit` | Dispatcher 把 in-scope 改动 commit 掉,让 Judge 看得见 |
+| 自动 rescue commit | Worker 改了文件但忘记 `git commit` | Dispatcher 把 in-scope 改动 commit 掉,让 Reviewer 看得见 |
 
 ### Verifier
 
 在 worktree 里跑 story 的 `verify:` shell 命令(没有就 fallback 到 `roles.yaml` 里的 `default_verify`),每条命令独立超时,环境变量 `CI=1`。stdout/stderr 截尾保留;完整输出落到 `runs/<id>-<ts>-verify-r<n>.log`。
 
-Verifier 在自己的 check 上是权威的。任何命令非 0 退出,这一轮直接短路 FAIL,不调 Judge LLM。
+Verifier 在自己的 check 上是权威的。任何命令非 0 退出,这一轮直接短路成 CHANGES_REQUESTED,不调 Reviewer LLM。
 
-### Judge (Role)
+### Reviewer (Role)
 
 读 user story、Verifier 记录、以及 base ref 之后的 `git log` + `git diff`。调 OpenAI 兼容的 Chat Completions endpoint,带 `response_format: json_object`,返回:
 
 ```json
-{"verdict": "PASS", "reason": "…"}
-{"verdict": "FAIL", "reason": "下一轮可执行的具体反馈"}
+{
+  "verdict": "APPROVED" | "CHANGES_REQUESTED",
+  "summary": "<一段总结>",
+  "ac_check": [{"ac": "...", "satisfied": true|false, "commit": "..."}],
+  "comments": [{"file": "...", "line": N, "severity": "blocker"|"nit", "comment": "..."}]
+}
 ```
 
-任何验收标准没明显达成、scope 越界、或 verifier 红了,Judge 都会判 FAIL。它的 reason 会被追加到 story 文件 (`## Captain Feedback (auto)` 段落),下一轮 Worker 启动时就能看到。
+任何验收标准没明显达成、scope 越界、或 verifier 红了,Reviewer 会标 CHANGES_REQUESTED。它的 reason 会被追加到 story 文件 (`## Reviewer Feedback (auto)` 段落),下一轮 Worker 启动时就能看到。
 
-### Worker / Judge 用各自独立的模型
+### Worker / Reviewer 用各自独立的模型
 
-Worker 和 Judge 各自在 `config/roles.yaml` 里挑一个 provider。它们可以共享一个 provider,也可以分别指向完全不同的 endpoint。详见下面的 [配置](#配置)。
+Worker 和 Reviewer 各自在 `config/roles.yaml` 里挑一个 provider。它们可以共享一个 provider,也可以分别指向完全不同的 endpoint。详见下面的 [配置](#配置)。
 
 ## 快速开始
 
@@ -117,7 +121,7 @@ go build -o hero ./cmd/hero
 # 2. 配置
 cp config.local.yaml.example config.local.yaml
 # 编辑 config.local.yaml: 填入 API key
-# 编辑 config/roles.yaml:  选 worker/judge 的 provider 和 target_repo
+# 编辑 config/roles.yaml:  选 worker/reviewer 的 provider 和 target_repo
 
 # 3. 投放 story
 cp examples/stories/us-001.md inbox/
@@ -137,7 +141,7 @@ config/
     ring.yaml          # 一个 provider 一个文件(无 secret,git 追踪)
     gpt-5.yaml
     ...
-  roles.yaml           # 哪个 provider 当 worker/judge + 运行时旋钮
+  roles.yaml           # 哪个 provider 当 worker/reviewer + 运行时旋钮
 config.local.yaml      # API key(gitignored,从 .example 拷一份)
 ```
 
@@ -170,7 +174,7 @@ worker:
   # model: inclusionai/ring-2.6-1t:free
   # reasoning_effort: xhigh
 
-judge:
+reviewer:
   provider: ring         # 也可指向不同 provider,得到独立审核
 
 target_repo: examples/target-repo
@@ -188,7 +192,7 @@ target_repo: examples/target-repo
 |---|---|
 | 同 provider 换 worker 模型 | 取消注释并修改 `roles.yaml` 的 `worker.model` |
 | 换到完全不同的 provider | 修改 `roles.yaml` 的 `worker.provider` |
-| 便宜的 worker + 强的 judge | 给两个 role 设不同的 `provider` |
+| 便宜的 worker + 强的 reviewer | 给两个 role 设不同的 `provider` |
 | 接入新 endpoint | 在 `config/providers/` 下放一个新 yaml + 在 `config.local.yaml` 加 `keys.<name>` |
 | 切换思考档 | 改 `default_reasoning_effort`(provider 级)或 `reasoning_effort`(role 级) |
 
@@ -242,7 +246,7 @@ keys:
 └───────────────────────────────────────────────────────────────────┘
 ```
 
-Worker 和 Judge 各自独立走一次 `LLMFor`,所以它们可以在同一进程里指向不同 provider。`worker.New` 里还有第三层 (Go 代码层) model 覆盖钩子 —— `role.Role.Model`,留给未来想"按 story 类型选模型"这类逻辑用,不需要碰 YAML。
+Worker 和 Reviewer 各自独立走一次 `LLMFor`,所以它们可以在同一进程里指向不同 provider。`worker.New` 里还有第三层 (Go 代码层) model 覆盖钩子 —— `role.Role.Model`,留给未来想"按 story 类型选模型"这类逻辑用,不需要碰 YAML。
 
 ## User Story 格式
 
@@ -308,7 +312,7 @@ verify:
     - go test -tags=integration ./...
 ```
 
-**tier 内**所有命令都跑(让作者一次看到所有 lint 错,不是只看第一个);**tier 间**只要一个 tier 有失败,后面的 tier 全部跳过。Judge prompt 上 PASS 时静默 —— 不会把每条成功命令的输出灌进 LLM context —— 所以分层不会膨胀 token。
+**tier 内**所有命令都跑(让作者一次看到所有 lint 错,不是只看第一个);**tier 间**只要一个 tier 有失败,后面的 tier 全部跳过。Reviewer prompt 上 APPROVED 时静默 —— 不会把每条成功命令的输出灌进 LLM context —— 所以分层不会膨胀 token。
 
 ## 目录结构
 
@@ -319,11 +323,11 @@ internal/
   agent/                   OpenAI 兼容 Chat Completions 客户端
   config/                  YAML loader + 角色级 LLM 解析
   dispatcher/              orchestrator + git worktree 管理 + inbox watcher
-  judge/                   PEV 判决 (verifier 短路 + LLM)
+  reviewer/                code review verdict (verifier 短路 + LLM)
   logging/                 slog 帮手
   role/                    Role 抽象 (system prompt + 允许的工具 + model)
   state/                   per-story 持久化状态 (原子 JSON)
-  story/                   frontmatter 解析 + judge feedback 追加
+  story/                   frontmatter 解析 + reviewer feedback 追加
   tooldef/                 Tool interface
   tools/                   bash, read_file, write_file, edit_file, grep, find, ls, read_tracker
   verifier/                确定性 shell 命令 runner

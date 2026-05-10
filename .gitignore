@@ -38,3 +38,4 @@ done/*.md
 .claude/scheduled_tasks.lock
 examples/target-repo/package-lock.json
 examples/target-repo/node_modules/
+worktrees/

@@ -1,6 +1,6 @@
 // Package verifier runs deterministic shell commands (tests, lint,
 // typecheck, etc.) against a target repo and produces a VerifierRecord
-// the Judge can consume.
+// the Reviewer can consume.
 package verifier
 
 import (
@@ -206,10 +206,10 @@ func ifThen[T any](cond bool, yes, no T) T {
 }
 
 // Summarize returns a one-block human/LLM-readable summary of the record,
-// suitable for feedback to the worker or for the Judge prompt.
+// suitable for feedback to the worker or for the Reviewer prompt.
 //
 // Convention: silent on success (one short OK line, no per-command output)
-// to keep judge prompt context clean — most rounds pass and dumping passing
+// to keep reviewer prompt context clean — most rounds pass and dumping passing
 // command output every time both wastes tokens and dilutes the LLM's
 // attention from the diff. On failure, surface the first failed tier with
 // per-command excerpts so the next worker round has actionable feedback.

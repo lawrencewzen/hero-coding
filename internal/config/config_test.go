@@ -40,7 +40,7 @@ default_reasoning_effort: medium
 	rolesRingOnly = `
 worker:
   provider: ring
-judge:
+reviewer:
   provider: ring
 target_repo: ./repo
 `
@@ -96,7 +96,7 @@ worker:
   provider: ring
   model: some-other-model
   reasoning_effort: xhigh
-judge:
+reviewer:
   provider: ring
 target_repo: /tmp
 `,
@@ -116,13 +116,13 @@ target_repo: /tmp
 		t.Errorf("worker effort override: got %q", w.ReasoningEffort)
 	}
 
-	// judge inherits provider defaults
-	j, _ := cfg.LLMFor("judge")
+	// reviewer inherits provider defaults
+	j, _ := cfg.LLMFor("reviewer")
 	if j.Model != "inclusionai/ring-2.6-1t:free" {
-		t.Errorf("judge inherited model: got %q", j.Model)
+		t.Errorf("reviewer inherited model: got %q", j.Model)
 	}
 	if j.ReasoningEffort != "high" {
-		t.Errorf("judge inherited effort: got %q", j.ReasoningEffort)
+		t.Errorf("reviewer inherited effort: got %q", j.ReasoningEffort)
 	}
 }
 
@@ -133,7 +133,7 @@ func TestLLMFor_DifferentProviderPerRole(t *testing.T) {
 		"config/roles.yaml": `
 worker:
   provider: ring
-judge:
+reviewer:
   provider: gpt-5
 target_repo: /tmp
 `,
@@ -145,16 +145,16 @@ target_repo: /tmp
 		t.Fatalf("Load: %v", err)
 	}
 	w, _ := cfg.LLMFor("worker")
-	j, _ := cfg.LLMFor("judge")
+	j, _ := cfg.LLMFor("reviewer")
 
 	if w.BaseURL != "https://openrouter.ai/api/v1" {
 		t.Errorf("worker base url: got %q", w.BaseURL)
 	}
 	if j.BaseURL != "https://api.openai.com/v1" {
-		t.Errorf("judge base url: got %q", j.BaseURL)
+		t.Errorf("reviewer base url: got %q", j.BaseURL)
 	}
 	if j.ReasoningEffort != "medium" {
-		t.Errorf("judge effort from gpt-5 default: got %q", j.ReasoningEffort)
+		t.Errorf("reviewer effort from gpt-5 default: got %q", j.ReasoningEffort)
 	}
 }
 
@@ -179,7 +179,7 @@ func TestLoad_RoleReferencesUnknownProvider(t *testing.T) {
 		"config/roles.yaml": `
 worker:
   provider: ring
-judge:
+reviewer:
   provider: nonexistent
 target_repo: /tmp
 `,
@@ -229,7 +229,7 @@ base_url: https://x.example/v1
 		"config/roles.yaml": `
 worker:
   provider: p
-judge:
+reviewer:
   provider: p
   model: explicit-model
 target_repo: /tmp
@@ -243,12 +243,12 @@ target_repo: /tmp
 	if _, err := cfg.LLMFor("worker"); err == nil {
 		t.Error("expected error for worker (no model anywhere)")
 	}
-	j, err := cfg.LLMFor("judge")
+	j, err := cfg.LLMFor("reviewer")
 	if err != nil {
-		t.Fatalf("judge LLMFor: %v", err)
+		t.Fatalf("reviewer LLMFor: %v", err)
 	}
 	if j.Model != "explicit-model" {
-		t.Errorf("judge model: got %q", j.Model)
+		t.Errorf("reviewer model: got %q", j.Model)
 	}
 }
 
@@ -279,7 +279,7 @@ func TestLoad_RuntimeOverrides(t *testing.T) {
 		"config/roles.yaml": `
 worker:
   provider: ring
-judge:
+reviewer:
   provider: ring
 target_repo: /tmp
 target_base_ref: develop

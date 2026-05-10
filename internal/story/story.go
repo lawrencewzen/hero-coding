@@ -248,21 +248,21 @@ func splitFrontmatter(raw []byte) ([]byte, string, error) {
 	return fm, string(body), nil
 }
 
-// AppendJudgeFeedback appends a fail reason for `round` to the story file
-// under a single "Captain Feedback (auto)" section. Idempotent: if the same
-// round marker is already present, no write happens. Atomic: write goes to
-// a sibling .tmp file, then renamed.
-func AppendJudgeFeedback(filepath string, round int, reason string) error {
+// AppendReviewerFeedback appends a CHANGES_REQUESTED block for `round` to
+// the story file under a single "Reviewer Feedback (auto)" section.
+// Idempotent: if the same round marker is already present, no write happens.
+// Atomic: write goes to a sibling .tmp file, then renamed.
+func AppendReviewerFeedback(filepath string, round int, reason string) error {
 	rawBytes, err := os.ReadFile(filepath)
 	if err != nil {
 		return err
 	}
 	raw := string(rawBytes)
-	marker := fmt.Sprintf("### Round %d — FAIL", round)
+	marker := fmt.Sprintf("### Round %d — CHANGES_REQUESTED", round)
 	if strings.Contains(raw, marker) {
 		return nil
 	}
-	const sep = "\n\n## Captain Feedback (auto)\n"
+	const sep = "\n\n## Reviewer Feedback (auto)\n"
 	block := fmt.Sprintf("\n%s\n%s\n", marker, reason)
 	var next string
 	if strings.Contains(raw, sep) {

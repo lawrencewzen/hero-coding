@@ -19,8 +19,8 @@ type Stats struct {
 	BaseSha      string `json:"baseSha"`
 	WorktreePath string `json:"worktreePath"`
 
-	Worker WorkerRef `json:"worker"`
-	Judge  JudgeRef  `json:"judge"`
+	Worker   WorkerRef   `json:"worker"`
+	Reviewer ReviewerRef `json:"reviewer"`
 
 	StartedAt   string `json:"startedAt"`
 	FinishedAt  string `json:"finishedAt,omitempty"`
@@ -28,7 +28,7 @@ type Stats struct {
 
 	WorkerRuns    []WorkerRunStats `json:"workerRuns"`
 	Verifications []VerifierRecord `json:"verifications"`
-	Verdicts      []VerdictRecord  `json:"verdicts"`
+	Reviews       []ReviewRecord   `json:"reviews"`
 
 	Commits     int    `json:"commits"`
 	FinalStatus string `json:"finalStatus"` // "done" | "gave_up" | "running"
@@ -39,7 +39,7 @@ type WorkerRef struct {
 	Model   string `json:"model"`
 }
 
-type JudgeRef struct {
+type ReviewerRef struct {
 	BaseURL string `json:"baseUrl"`
 	Model   string `json:"model"`
 }
@@ -55,13 +55,42 @@ type WorkerRunStats struct {
 	KillReason    string         `json:"killReason,omitempty"`
 }
 
-type VerdictRecord struct {
-	Round             int    `json:"round"`
-	Verdict           string `json:"verdict"` // PASS | FAIL
-	Reason            string `json:"reason"`
-	JudgeWallMs       int64  `json:"judgeWallMs"`
-	VerifierAllPassed bool   `json:"verifierAllPassed,omitempty"`
-	ShortCircuited    bool   `json:"shortCircuited,omitempty"`
+// Verdict values produced by the Reviewer. APPROVED ships; CHANGES_REQUESTED
+// bounces back to the worker with the comments below.
+const (
+	VerdictApproved          = "APPROVED"
+	VerdictChangesRequested  = "CHANGES_REQUESTED"
+)
+
+// ReviewRecord captures one Reviewer round's output. Comments are intended
+// to be fed back to the worker verbatim (see reviewer.FormatFeedback).
+type ReviewRecord struct {
+	Round             int             `json:"round"`
+	Verdict           string          `json:"verdict"` // APPROVED | CHANGES_REQUESTED
+	Summary           string          `json:"summary"`
+	ACCheck           []ACCheckItem   `json:"acCheck,omitempty"`
+	Comments          []ReviewComment `json:"comments,omitempty"`
+	ReviewerWallMs    int64           `json:"reviewerWallMs"`
+	VerifierAllPassed bool            `json:"verifierAllPassed,omitempty"`
+	ShortCircuited    bool            `json:"shortCircuited,omitempty"`
+}
+
+// ACCheckItem records the Reviewer's per-acceptance-criterion verdict.
+type ACCheckItem struct {
+	AC        string `json:"ac"`
+	Satisfied bool   `json:"satisfied"`
+	Commit    string `json:"commit,omitempty"`
+	Note      string `json:"note,omitempty"`
+}
+
+// ReviewComment is one structured code-review remark. severity == "blocker"
+// is fed back as a must-fix; "nit" is informational and does not by itself
+// cause CHANGES_REQUESTED.
+type ReviewComment struct {
+	File     string `json:"file,omitempty"`
+	Line     int    `json:"line,omitempty"`
+	Severity string `json:"severity"` // "blocker" | "nit"
+	Comment  string `json:"comment"`
 }
 
 type VerifierCommandRecord struct {
