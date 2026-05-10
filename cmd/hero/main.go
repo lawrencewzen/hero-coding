@@ -12,27 +12,23 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/joho/godotenv"
-
 	"hero-coding/internal/config"
 	"hero-coding/internal/dispatcher"
 )
 
 func main() {
-	// Load .env from the project root if present (silent if missing).
-	_ = godotenv.Load()
-
-	cfg, err := config.Load()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "config:", err)
-		os.Exit(2)
-	}
-
 	cwd, err := os.Getwd()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "getwd:", err)
 		os.Exit(2)
 	}
+
+	cfg, err := config.Load(cwd)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "config:", err)
+		os.Exit(2)
+	}
+
 	paths := dispatcher.DefaultPaths(cwd)
 	d, err := dispatcher.New(cfg, paths)
 	if err != nil {

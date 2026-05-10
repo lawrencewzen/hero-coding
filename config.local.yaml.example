@@ -1,0 +1,8 @@
+# Copy this file to config.local.yaml (which is gitignored) and fill in
+# the actual API keys. Each key under `keys:` matches a provider's `name`
+# field in config/providers/<name>.yaml.
+
+keys:
+  ring: sk-or-v1-PLACEHOLDER_GET_FROM_https://openrouter.ai/settings/keys
+  # gpt-5: sk-PLACEHOLDER
+  # claude-opus: sk-ant-PLACEHOLDER

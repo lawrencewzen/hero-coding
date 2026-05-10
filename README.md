@@ -62,7 +62,7 @@ The Verifier produces deterministic evidence (test exit codes); the Judge reads 
 Watches `inbox/` for `.md` files. When a story appears it:
 
 1. Parses the YAML frontmatter (id, title, priority, max_retries, verify, scope).
-2. Creates a git worktree on branch `hero/<id>` from `TARGET_BASE_REF`.
+2. Creates a git worktree on branch `hero/<id>` from `target_base_ref`.
 3. Runs the round loop until PASS or `max_retries` exhausted.
 4. On PASS, moves the story to `done/`. On exhaustion, records the run as `gave_up`.
 
@@ -89,7 +89,7 @@ The worker's behaviour is configured by a **Role** — system prompt + allowed-t
 
 ### Verifier
 
-Runs the story's `verify:` shell commands (or the `HERO_DEFAULT_VERIFY` fallback) inside the worktree with a per-command timeout and CI=1 in env. Stdout/stderr are captured and tailed; full output goes to `runs/<id>-<ts>-verify-r<n>.log`.
+Runs the story's `verify:` shell commands (or the `default_verify` fallback from `roles.yaml`) inside the worktree with a per-command timeout and CI=1 in env. Stdout/stderr are captured and tailed; full output goes to `runs/<id>-<ts>-verify-r<n>.log`.
 
 The Verifier is authoritative on its checks. If any command exits non-zero, the round short-circuits to FAIL without calling the Judge LLM.
 
@@ -106,7 +106,7 @@ The Judge fails a round if any Acceptance Criterion isn't visibly satisfied, sco
 
 ### Worker / Judge use independent models
 
-Worker and Judge each bind to a `<provider>/<model>` pair via env. They can share one provider, or point at completely different endpoints. See [Configuration](#configuration) below.
+Worker and Judge each pick a provider in `config/roles.yaml`. They can share one provider, or point at completely different endpoints. See [Configuration](#configuration) below.
 
 ## Quick Start
 
@@ -115,62 +115,103 @@ Worker and Judge each bind to a `<provider>/<model>` pair via env. They can shar
 go build -o hero ./cmd/hero
 
 # 2. Configure
-cp .env.example .env
-# edit .env: WORKER_*, JUDGE_*, TARGET_REPO
+cp config.local.yaml.example config.local.yaml
+# edit config.local.yaml: paste your API key(s)
+# edit config/roles.yaml:  pick worker/judge providers + target_repo
 
 # 3. Drop a story
 cp examples/stories/us-001.md inbox/
 
 # 4. Run
-./hero watch          # watch inbox/ continuously
+./hero watch                 # watch inbox/ continuously
 ./hero run inbox/us-001.md   # process one story and exit
 ```
 
 ## Configuration
 
-All configuration is via environment variables (loaded from `.env` if present). The model is two-layered: define **providers** once, then **bind roles** to a `<provider>/<model>` pair.
+Configuration is layered across YAML files at the project root. **No environment variables, no `export`.** Run `./hero` from the project directory and it reads:
 
-### Providers
-
-```bash
-# Pattern: HERO_PROVIDER_<name>_{BASE_URL,API_KEY,INSECURE_TLS}
-HERO_PROVIDER_coproxy_BASE_URL=https://localhost:8443/v1
-HERO_PROVIDER_coproxy_API_KEY=sk-...
-HERO_PROVIDER_coproxy_INSECURE_TLS=true   # dev-only: accept self-signed certs
-
-HERO_PROVIDER_openai_BASE_URL=https://api.openai.com/v1
-HERO_PROVIDER_openai_API_KEY=sk-...
+```
+config/
+  providers/
+    ring.yaml          # one file per LLM provider (no secrets, git-tracked)
+    gpt-5.yaml
+    ...
+  roles.yaml           # which provider plays worker/judge + runtime knobs
+config.local.yaml      # API keys (gitignored — copy from .example)
 ```
 
-`<name>` may be any `[A-Za-z0-9._-]+` identifier. `INSECURE_TLS` is optional (default `false`); use it only for local self-signed proxies.
+**Resolution order** when computing a role's effective LLM config:
 
-### Role bindings
+```
+model            = role.model            OR provider.default_model
+reasoning_effort = role.reasoning_effort OR provider.default_reasoning_effort
+api_key          = config.local.yaml → keys[<provider name>]
+```
 
-```bash
-HERO_WORKER=coproxy/gpt-5.4    # provider/model
-HERO_JUDGE=openai/gpt-5.5
+### Provider file (`config/providers/ring.yaml`)
+
+```yaml
+name: ring                                   # matches keys.ring in config.local.yaml
+base_url: https://openrouter.ai/api/v1
+default_model: inclusionai/ring-2.6-1t:free
+default_reasoning_effort: high               # forwarded as OpenAI-style `reasoning_effort`
+# insecure_tls: true                         # dev-only: accept self-signed certs
+```
+
+`reasoning_effort` is forwarded verbatim — `low` / `medium` / `high` for OpenAI-family models, `high` / `xhigh` for Ant Ling Ring, `""` (or omitted) for models that don't support a thinking budget.
+
+### Role assignment (`config/roles.yaml`)
+
+```yaml
+worker:
+  provider: ring
+  # Optional overrides — uncomment to override the provider's defaults:
+  # model: inclusionai/ring-2.6-1t:free
+  # reasoning_effort: xhigh
+
+judge:
+  provider: ring         # or point at a different provider for an independent verdict
+
+target_repo: examples/target-repo
+# target_base_ref: main           # default: main
+# max_retries: 3
+# max_parallel: 2
+# verify_timeout_ms: 120000
+# default_verify:
+#   - go test ./...
 ```
 
 **Switching is one line.**
 
 | Goal | Change |
 |---|---|
-| Swap worker model on the same provider | `HERO_WORKER=coproxy/claude-4.7` |
-| Swap worker to a different provider | `HERO_WORKER=openai/gpt-5.5` |
-| Cheap worker + strong judge (or vice versa) | Edit both lines |
-| One-off run without touching `.env` | `HERO_WORKER=openai/gpt-5.5 ./hero run inbox/us-001.md` |
-| Add a new endpoint | Add three `HERO_PROVIDER_<name>_*` lines, then bind |
+| Swap worker model on the same provider | uncomment + edit `worker.model` in `roles.yaml` |
+| Swap worker to a different provider | edit `worker.provider` in `roles.yaml` |
+| Cheap worker + strong judge | use different `provider` for each role |
+| Add a new endpoint | drop a new `config/providers/<name>.yaml` + add `keys.<name>` in `config.local.yaml` |
+| Switch reasoning effort | edit `default_reasoning_effort` (provider) or `reasoning_effort` (role) |
 
-### Other settings
+### Secrets (`config.local.yaml`)
 
-| Var | Required | Default | Description |
+```yaml
+keys:
+  ring: sk-or-v1-...
+  gpt-5: sk-...
+```
+
+This file is **gitignored** by default (see `.gitignore`). Keep it out of version control. The key under `keys:` must match the provider's `name` field.
+
+### Runtime knobs (top-level in `roles.yaml`)
+
+| Field | Required | Default | Description |
 |---|---|---|---|
-| `TARGET_REPO`     | yes | — | Absolute path to the target git repo |
-| `TARGET_BASE_REF` | no  | `main` | Branch / ref each worktree is cut from |
-| `MAX_RETRIES`     | no  | `3` | Round budget per story (story-level `max_retries:` overrides) |
-| `MAX_PARALLEL`    | no  | `2` | Concurrent stories the watcher will process |
-| `HERO_DEFAULT_VERIFY` | no | (empty) | Newline-separated default verifier commands when a story has no `verify:` |
-| `HERO_VERIFY_TIMEOUT_MS` | no | `120000` | Per-command timeout for the verifier |
+| `target_repo`     | yes | — | Path to the target git repo (relative paths resolve against the project root) |
+| `target_base_ref` | no  | `main` | Branch / ref each worktree is cut from |
+| `max_retries`     | no  | `3` | Round budget per story (story-level `max_retries:` overrides) |
+| `max_parallel`    | no  | `2` | Concurrent stories the watcher will process |
+| `default_verify`  | no  | `[]` | Default verifier commands when a story has no `verify:` |
+| `verify_timeout_ms` | no | `120000` | Per-command timeout for the verifier |
 
 ## User Story Format
 
@@ -213,7 +254,7 @@ Frontmatter fields:
 | `id` | yes | Must match `[A-Za-z0-9][A-Za-z0-9._-]*` (used as git branch suffix) |
 | `title` | yes | Human-readable title |
 | `priority` | no | `low` \| `normal` \| `high` (default `normal`) |
-| `max_retries` | no | Overrides `MAX_RETRIES` env var for this story |
+| `max_retries` | no | Overrides `roles.yaml`'s `max_retries` for this story |
 | `verify` | no | Shell commands the Verifier runs after each round. Either a flat list (single "default" tier) or an ordered map of named tiers — see below |
 | `scope` | no | Glob patterns the auto-rescue commit will stage (others left untouched) |
 
@@ -242,9 +283,10 @@ Within a tier all commands still run (so the author sees every lint error at onc
 
 ```
 cmd/hero/                  CLI entry point
+config/                    YAML configuration (providers + role assignment)
 internal/
   agent/                   OpenAI-compatible Chat Completions client
-  config/                  env-driven configuration
+  config/                  YAML loader + per-role LLM resolution
   dispatcher/              orchestrator + git worktree mgmt + inbox watcher
   judge/                   PEV verdict (verifier short-circuit + LLM)
   logging/                 slog helpers

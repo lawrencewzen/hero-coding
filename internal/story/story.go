@@ -172,7 +172,7 @@ func normalize(r rawFrontmatter) (Frontmatter, error) {
 //     → preserved in declaration order
 //
 // Empty / missing verify returns nil so the dispatcher can decide whether
-// to fall back to HERO_DEFAULT_VERIFY.
+// to fall back to default_verify in roles.yaml.
 func parseVerify(n yaml.Node) ([]VerifyTier, error) {
 	if n.Kind == 0 {
 		return nil, nil

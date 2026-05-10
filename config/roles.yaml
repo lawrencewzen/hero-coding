@@ -1,0 +1,24 @@
+# Role assignment + runtime knobs.
+# Switch worker/judge models by changing `provider` here — provider names
+# come from the filenames (without .yaml) under config/providers/.
+
+worker:
+  provider: ring
+  # Optional overrides — uncomment to override the provider's defaults:
+  # model: inclusionai/ring-2.6-1t:free
+  # reasoning_effort: xhigh
+
+judge:
+  provider: ring
+
+# Where Hero Coding will run stories. Relative paths resolve against the
+# project root (where you run `hero` from).
+target_repo: examples/target-repo
+# target_base_ref: main           # default: main
+
+# Runtime knobs (all optional, defaults shown):
+# max_retries: 3
+# max_parallel: 2
+# verify_timeout_ms: 120000
+# default_verify:
+#   - go test ./...

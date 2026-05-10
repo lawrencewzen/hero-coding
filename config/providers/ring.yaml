@@ -1,0 +1,6 @@
+# Ant Ling Ring-2.6-1T (thinking model) via OpenRouter
+# Spec: https://openrouter.ai/inclusionai/ring-2.6-1t:free
+name: ring
+base_url: https://openrouter.ai/api/v1
+default_model: inclusionai/ring-2.6-1t:free
+default_reasoning_effort: high   # Ring supports high / xhigh; brief recommends high as default

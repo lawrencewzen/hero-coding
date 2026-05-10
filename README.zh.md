@@ -62,7 +62,7 @@ Verifier 产出确定性证据(命令退出码),Judge 看 verifier 记录 + git 
 监听 `inbox/` 下的 `.md` 文件。新 story 出现时:
 
 1. 解析 YAML frontmatter (id、title、priority、max_retries、verify、scope)。
-2. 从 `TARGET_BASE_REF` 切一个 worktree,分支名 `hero/<id>`。
+2. 从 `target_base_ref` 切一个 worktree,分支名 `hero/<id>`。
 3. 进入 round loop,直到 PASS 或 `max_retries` 用完。
 4. PASS 时把 story 移到 `done/`;用完仍未 PASS 时记录为 `gave_up`。
 
@@ -89,7 +89,7 @@ Worker 的行为通过 **Role** 配置 —— system prompt + 工具白名单 + 
 
 ### Verifier
 
-在 worktree 里跑 story 的 `verify:` shell 命令(没有就 fallback 到 `HERO_DEFAULT_VERIFY`),每条命令独立超时,环境变量 `CI=1`。stdout/stderr 截尾保留;完整输出落到 `runs/<id>-<ts>-verify-r<n>.log`。
+在 worktree 里跑 story 的 `verify:` shell 命令(没有就 fallback 到 `roles.yaml` 里的 `default_verify`),每条命令独立超时,环境变量 `CI=1`。stdout/stderr 截尾保留;完整输出落到 `runs/<id>-<ts>-verify-r<n>.log`。
 
 Verifier 在自己的 check 上是权威的。任何命令非 0 退出,这一轮直接短路 FAIL,不调 Judge LLM。
 
@@ -106,7 +106,7 @@ Verifier 在自己的 check 上是权威的。任何命令非 0 退出,这一轮
 
 ### Worker / Judge 用各自独立的模型
 
-Worker 和 Judge 各自通过 env 绑定一个 `<provider>/<model>` 组合。它们可以共享一个 provider,也可以分别指向完全不同的 endpoint。详见下面的 [配置](#配置)。
+Worker 和 Judge 各自在 `config/roles.yaml` 里挑一个 provider。它们可以共享一个 provider,也可以分别指向完全不同的 endpoint。详见下面的 [配置](#配置)。
 
 ## 快速开始
 
@@ -115,8 +115,9 @@ Worker 和 Judge 各自通过 env 绑定一个 `<provider>/<model>` 组合。它
 go build -o hero ./cmd/hero
 
 # 2. 配置
-cp .env.example .env
-# 编辑 .env: WORKER_*, JUDGE_*, TARGET_REPO
+cp config.local.yaml.example config.local.yaml
+# 编辑 config.local.yaml: 填入 API key
+# 编辑 config/roles.yaml:  选 worker/judge 的 provider 和 target_repo
 
 # 3. 投放 story
 cp examples/stories/us-001.md inbox/
@@ -128,49 +129,89 @@ cp examples/stories/us-001.md inbox/
 
 ## 配置
 
-所有配置走环境变量(若存在 `.env` 会自动加载)。模型分两层:**Provider** 定义一次 endpoint,然后 **Role 绑定** 到 `<provider>/<model>` 组合。
+配置由项目根目录下的几个 YAML 文件分层组成。**不需要环境变量,不需要 `export`。** 在项目目录跑 `./hero` 即可,它会读取:
 
-### Providers
-
-```bash
-# 命名模式: HERO_PROVIDER_<name>_{BASE_URL,API_KEY,INSECURE_TLS}
-HERO_PROVIDER_coproxy_BASE_URL=https://localhost:8443/v1
-HERO_PROVIDER_coproxy_API_KEY=sk-...
-HERO_PROVIDER_coproxy_INSECURE_TLS=true   # 仅开发用:接受自签名证书
-
-HERO_PROVIDER_openai_BASE_URL=https://api.openai.com/v1
-HERO_PROVIDER_openai_API_KEY=sk-...
+```
+config/
+  providers/
+    ring.yaml          # 一个 provider 一个文件(无 secret,git 追踪)
+    gpt-5.yaml
+    ...
+  roles.yaml           # 哪个 provider 当 worker/judge + 运行时旋钮
+config.local.yaml      # API key(gitignored,从 .example 拷一份)
 ```
 
-`<name>` 可以是任意 `[A-Za-z0-9._-]+` 标识符。`INSECURE_TLS` 可选(默认 `false`),只在对接本地自签名 proxy 时用。
+**Role 的最终 LLM 配置解析顺序**:
 
-### Role 绑定
+```
+model            = role.model            OR provider.default_model
+reasoning_effort = role.reasoning_effort OR provider.default_reasoning_effort
+api_key          = config.local.yaml → keys[<provider name>]
+```
 
-```bash
-HERO_WORKER=coproxy/gpt-5.4    # provider/model
-HERO_JUDGE=openai/gpt-5.5
+### Provider 文件 (`config/providers/ring.yaml`)
+
+```yaml
+name: ring                                   # 对应 config.local.yaml 里的 keys.ring
+base_url: https://openrouter.ai/api/v1
+default_model: inclusionai/ring-2.6-1t:free
+default_reasoning_effort: high               # 透传为 OpenAI 风格的 `reasoning_effort` 字段
+# insecure_tls: true                         # 仅开发用:接受自签名证书
+```
+
+`reasoning_effort` 原样透传 —— OpenAI 系是 `low` / `medium` / `high`,蚂蚁百灵 Ring 是 `high` / `xhigh`,不支持思考档的模型设 `""` 或省略即可。
+
+### Role 分配 (`config/roles.yaml`)
+
+```yaml
+worker:
+  provider: ring
+  # 可选 override —— 取消注释即可覆盖 provider 默认值:
+  # model: inclusionai/ring-2.6-1t:free
+  # reasoning_effort: xhigh
+
+judge:
+  provider: ring         # 也可指向不同 provider,得到独立审核
+
+target_repo: examples/target-repo
+# target_base_ref: main           # 默认: main
+# max_retries: 3
+# max_parallel: 2
+# verify_timeout_ms: 120000
+# default_verify:
+#   - go test ./...
 ```
 
 **切换就改一行**。
 
 | 目标 | 改动 |
 |---|---|
-| 同 provider 换 worker 模型 | `HERO_WORKER=coproxy/claude-4.7` |
-| 换到完全不同的 provider | `HERO_WORKER=openai/gpt-5.5` |
-| 便宜的 worker + 强的 judge(或反过来) | 改两行 |
-| 单次跑,不污染 `.env` | `HERO_WORKER=openai/gpt-5.5 ./hero run inbox/us-001.md` |
-| 接入新 endpoint | 加三行 `HERO_PROVIDER_<name>_*`,然后绑定 |
+| 同 provider 换 worker 模型 | 取消注释并修改 `roles.yaml` 的 `worker.model` |
+| 换到完全不同的 provider | 修改 `roles.yaml` 的 `worker.provider` |
+| 便宜的 worker + 强的 judge | 给两个 role 设不同的 `provider` |
+| 接入新 endpoint | 在 `config/providers/` 下放一个新 yaml + 在 `config.local.yaml` 加 `keys.<name>` |
+| 切换思考档 | 改 `default_reasoning_effort`(provider 级)或 `reasoning_effort`(role 级) |
 
-### 其它配置
+### Secrets (`config.local.yaml`)
 
-| 变量 | 必填 | 默认 | 说明 |
+```yaml
+keys:
+  ring: sk-or-v1-...
+  gpt-5: sk-...
+```
+
+**该文件默认 gitignored**(见 `.gitignore`),不要入库。`keys:` 下每个键名要和 provider 文件里的 `name` 字段一致。
+
+### 运行时旋钮(写在 `roles.yaml` 顶层)
+
+| 字段 | 必填 | 默认 | 说明 |
 |---|---|---|---|
-| `TARGET_REPO`     | 是 | — | 目标 git 仓库的绝对路径 |
-| `TARGET_BASE_REF` | 否 | `main` | 每个 worktree 的 base 分支 / ref |
-| `MAX_RETRIES`     | 否 | `3` | 单 story 的轮次预算(story 自带 `max_retries:` 会覆盖) |
-| `MAX_PARALLEL`    | 否 | `2` | watcher 并发处理的 story 数 |
-| `HERO_DEFAULT_VERIFY` | 否 | (空) | story 没声明 `verify:` 时的默认命令(用换行分隔) |
-| `HERO_VERIFY_TIMEOUT_MS` | 否 | `120000` | Verifier 单条命令的超时 |
+| `target_repo`     | 是 | — | 目标 git 仓库路径(相对路径以项目根目录为基准) |
+| `target_base_ref` | 否 | `main` | 每个 worktree 的 base 分支 / ref |
+| `max_retries`     | 否 | `3` | 单 story 的轮次预算(story 自带 `max_retries:` 会覆盖) |
+| `max_parallel`    | 否 | `2` | watcher 并发处理的 story 数 |
+| `default_verify`  | 否 | `[]` | story 没声明 `verify:` 时的默认命令 |
+| `verify_timeout_ms` | 否 | `120000` | Verifier 单条命令的超时(毫秒) |
 
 ## User Story 格式
 
@@ -213,7 +254,7 @@ Frontmatter 字段:
 | `id` | 是 | 必须匹配 `[A-Za-z0-9][A-Za-z0-9._-]*` (用作 git 分支后缀) |
 | `title` | 是 | 人类可读的标题 |
 | `priority` | 否 | `low` \| `normal` \| `high` (默认 `normal`) |
-| `max_retries` | 否 | 覆盖此 story 的 `MAX_RETRIES` |
+| `max_retries` | 否 | 覆盖 `roles.yaml` 里 `max_retries` 的 story 级值 |
 | `verify` | 否 | Verifier 每轮跑的 shell 命令。可写成平铺 list(单 "default" tier)或有序 map(分层),见下面 |
 | `scope` | 否 | Glob 模式列表,auto-rescue commit 只 stage 这些路径(其它文件不动) |
 
@@ -242,9 +283,10 @@ verify:
 
 ```
 cmd/hero/                  CLI 入口
+config/                    YAML 配置(providers + role 分配)
 internal/
   agent/                   OpenAI 兼容 Chat Completions 客户端
-  config/                  env 驱动的配置
+  config/                  YAML loader + 角色级 LLM 解析
   dispatcher/              orchestrator + git worktree 管理 + inbox watcher
   judge/                   PEV 判决 (verifier 短路 + LLM)
   logging/                 slog 帮手

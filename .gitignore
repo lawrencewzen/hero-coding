@@ -12,6 +12,8 @@ coverage.out
 # secrets
 .env
 .env.local
+config.local.yaml
+*.local.yaml
 
 # runtime working dirs
 workspace/
