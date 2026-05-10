@@ -106,7 +106,16 @@ func (c *LLMClient) Chat(ctx context.Context, msgs []ChatMessage, tools []map[st
 }
 
 // ChatWithOptions is Chat plus per-call overrides (temperature, response_format).
+// Wraps chatOnce in a rate-limit retry loop — see retry.go.
 func (c *LLMClient) ChatWithOptions(ctx context.Context, msgs []ChatMessage, tools []map[string]any, opts ChatOptions) (*ChatMessage, error) {
+	return retryRateLimit(ctx, func() (*ChatMessage, error) {
+		return c.chatOnce(ctx, msgs, tools, opts)
+	})
+}
+
+// chatOnce performs a single non-streaming chat completion request. Callers
+// should go through ChatWithOptions which adds rate-limit retry.
+func (c *LLMClient) chatOnce(ctx context.Context, msgs []ChatMessage, tools []map[string]any, opts ChatOptions) (*ChatMessage, error) {
 	if c == nil {
 		return nil, fmt.Errorf("llm client is nil")
 	}
@@ -197,7 +206,16 @@ func (c *LLMClient) ChatWithOptions(ctx context.Context, msgs []ChatMessage, too
 // Stream 调用 OpenAI streaming chat completions（SSE），返回完整 assistant message。
 // onDelta 在每个文本片段到达时调用（可为 nil）。
 // 若响应 Content-Type 不含 event-stream，降级为普通 JSON 解析（兼容 mock server / 测试）。
+// Wraps streamOnce in a rate-limit retry loop — see retry.go.
 func (c *LLMClient) Stream(ctx context.Context, msgs []ChatMessage, tools []map[string]any, onDelta func(text string)) (*ChatMessage, error) {
+	return retryRateLimit(ctx, func() (*ChatMessage, error) {
+		return c.streamOnce(ctx, msgs, tools, onDelta)
+	})
+}
+
+// streamOnce performs a single streaming chat completion request. Callers
+// should go through Stream which adds rate-limit retry.
+func (c *LLMClient) streamOnce(ctx context.Context, msgs []ChatMessage, tools []map[string]any, onDelta func(text string)) (*ChatMessage, error) {
 	if c == nil {
 		return nil, fmt.Errorf("llm client is nil")
 	}
