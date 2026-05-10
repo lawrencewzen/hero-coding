@@ -213,6 +213,37 @@ This file is **gitignored** by default (see `.gitignore`). Keep it out of versio
 | `default_verify`  | no  | `[]` | Default verifier commands when a story has no `verify:` |
 | `verify_timeout_ms` | no | `120000` | Per-command timeout for the verifier |
 
+### How config flows into a running worker
+
+Configuration is loaded **once at process startup** and frozen into each Worker's HTTP client. There is no hot-reload — edits to YAML require a `hero` restart to take effect.
+
+```
+┌─ Startup (once) ────────────────────────────────────────────────┐
+│                                                                  │
+│  config/providers/*.yaml ┐                                       │
+│  config/roles.yaml       ├→ config.Load(cwd) ──→ *Config         │
+│  config.local.yaml       ┘                                       │
+│                                                                  │
+│  cfg.LLMFor("worker") ──→ LLMConfig                              │
+│      model   = role.model            ?: provider.default_model   │
+│      effort  = role.reasoning_effort ?: provider.default_effort  │
+│      api_key = secrets.keys[provider.name]                       │
+│                                                                  │
+│  worker.New(LLMConfig) → agent.NewLLMClient → persistent client  │
+│                                                                  │
+└──────────────────────────────────────────────────────────────────┘
+
+┌─ Runtime (every round) ─────────────────────────────────────────┐
+│                                                                  │
+│  Worker.Run() → w.llm.Chat() → POST <base_url>/chat/completions  │
+│                  ▲                                               │
+│                  └─ frozen at startup; YAML never re-read here.  │
+│                                                                  │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+Worker and Judge each go through `LLMFor` independently, so they can sit on different providers within the same process. There is also a third (Go-level) model-override hook in `worker.New` via `role.Role.Model`, which lets future code pick a model per story without touching YAML.
+
 ## User Story Format
 
 ```markdown

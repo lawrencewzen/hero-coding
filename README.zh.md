@@ -213,6 +213,37 @@ keys:
 | `default_verify`  | 否 | `[]` | story 没声明 `verify:` 时的默认命令 |
 | `verify_timeout_ms` | 否 | `120000` | Verifier 单条命令的超时(毫秒) |
 
+### 配置如何进入运行中的 Worker
+
+配置是 **进程启动时一次性** 加载、烘焙进每个 Worker 的 HTTP client 的。不存在 hot-reload —— 改了 YAML 必须重启 `hero` 进程才会生效。
+
+```
+┌─ 启动期(一次) ───────────────────────────────────────────────────┐
+│                                                                   │
+│  config/providers/*.yaml ┐                                        │
+│  config/roles.yaml       ├→ config.Load(cwd) ──→ *Config          │
+│  config.local.yaml       ┘                                        │
+│                                                                   │
+│  cfg.LLMFor("worker") ──→ LLMConfig                               │
+│      model   = role.model            ?: provider.default_model    │
+│      effort  = role.reasoning_effort ?: provider.default_effort   │
+│      api_key = secrets.keys[provider.name]                        │
+│                                                                   │
+│  worker.New(LLMConfig) → agent.NewLLMClient → 持久 client         │
+│                                                                   │
+└───────────────────────────────────────────────────────────────────┘
+
+┌─ 运行期(每个 round) ─────────────────────────────────────────────┐
+│                                                                   │
+│  Worker.Run() → w.llm.Chat() → POST <base_url>/chat/completions   │
+│                  ▲                                                │
+│                  └─ 启动时已冻结;运行期不再读 YAML。               │
+│                                                                   │
+└───────────────────────────────────────────────────────────────────┘
+```
+
+Worker 和 Judge 各自独立走一次 `LLMFor`,所以它们可以在同一进程里指向不同 provider。`worker.New` 里还有第三层 (Go 代码层) model 覆盖钩子 —— `role.Role.Model`,留给未来想"按 story 类型选模型"这类逻辑用,不需要碰 YAML。
+
 ## User Story 格式
 
 ```markdown
