@@ -47,6 +47,7 @@ type Frontmatter struct {
 	MaxRetries *int         `yaml:"max_retries"`
 	Verify     []VerifyTier // parsed from either a flat list or an ordered map
 	Scope      []string     `yaml:"scope"`
+	DependsOn  []string     `yaml:"depends_on"` // sequencer uses this for DAG ordering
 }
 
 // rawFrontmatter is the wire-form used during YAML decoding. `Verify` is a
@@ -60,6 +61,7 @@ type rawFrontmatter struct {
 	MaxRetries *int      `yaml:"max_retries"`
 	Verify     yaml.Node `yaml:"verify"`
 	Scope      []string  `yaml:"scope"`
+	DependsOn  []string  `yaml:"depends_on"`
 }
 
 // Story is a parsed user story file.
@@ -153,6 +155,18 @@ func normalize(r rawFrontmatter) (Frontmatter, error) {
 		return Frontmatter{}, fmt.Errorf("frontmatter.created must be a string or date, got %T", v)
 	}
 
+	for i, d := range r.DependsOn {
+		if d == "" {
+			return Frontmatter{}, fmt.Errorf("frontmatter.depends_on[%d] must be non-empty", i)
+		}
+		if !safeID.MatchString(d) {
+			return Frontmatter{}, fmt.Errorf("frontmatter.depends_on[%d] %q must match %s", i, d, safeID.String())
+		}
+		if d == r.ID {
+			return Frontmatter{}, fmt.Errorf("frontmatter.depends_on[%d]: story cannot depend on itself", i)
+		}
+	}
+
 	return Frontmatter{
 		ID:         r.ID,
 		Title:      r.Title,
@@ -161,6 +175,7 @@ func normalize(r rawFrontmatter) (Frontmatter, error) {
 		MaxRetries: r.MaxRetries,
 		Verify:     verify,
 		Scope:      r.Scope,
+		DependsOn:  r.DependsOn,
 	}, nil
 }
 

@@ -1,8 +1,9 @@
 // hero is the CLI entry point. Subcommands:
 //
-//	hero watch              start the inbox watcher (default)
-//	hero run <story.md>     process a single story and exit
-//	hero plan <plan.md>     turn a high-level plan into N user stories under inbox/<plan-name>/
+//	hero watch                    start the inbox watcher (default)
+//	hero run <story.md>           process a single story and exit
+//	hero plan <plan.md>           turn a plan into N stories under inbox/<plan-name>/
+//	hero run-plan <plan-name>     run every story under inbox/<plan-name>/ in DAG order
 package main
 
 import (
@@ -17,6 +18,7 @@ import (
 	"hero-coding/internal/dispatcher"
 	"hero-coding/internal/planner"
 	"hero-coding/internal/role"
+	"hero-coding/internal/sequencer"
 )
 
 func main() {
@@ -106,8 +108,36 @@ func main() {
 		}
 		manifestRel, _ := filepath.Rel(cwd, res.ManifestPath)
 		fmt.Printf("manifest: %s\n", manifestRel)
+	case "run-plan":
+		if len(args) == 0 {
+			fmt.Fprintln(os.Stderr, "usage: hero run-plan <plan-name>")
+			os.Exit(2)
+		}
+		planName := args[0]
+		planDir := filepath.Join(paths.Inbox, planName)
+		if _, err := os.Stat(planDir); err != nil {
+			fmt.Fprintf(os.Stderr, "run-plan: plan dir not found: %s\n", planDir)
+			os.Exit(2)
+		}
+		d, err := dispatcher.New(cfg, paths)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "init dispatcher:", err)
+			os.Exit(2)
+		}
+		res, err := sequencer.Run(ctx, planDir, d)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "run-plan:", err)
+			os.Exit(1)
+		}
+		fmt.Print(sequencer.FormatReport(res))
+		// Non-zero exit if any story didn't complete cleanly.
+		for _, sr := range res.Results {
+			if sr.Status != sequencer.StatusDone {
+				os.Exit(1)
+			}
+		}
 	case "-h", "--help", "help":
-		fmt.Println("usage: hero [watch | run <story.md> | plan <plan.md>]")
+		fmt.Println("usage: hero [watch | run <story.md> | plan <plan.md> | run-plan <plan-name>]")
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n", cmd)
 		os.Exit(2)

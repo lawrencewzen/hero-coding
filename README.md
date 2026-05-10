@@ -127,9 +127,15 @@ cp config.local.yaml.example config.local.yaml
 cp examples/stories/us-001.md inbox/
 
 # 4. Run
-./hero watch                 # watch inbox/ continuously
-./hero run inbox/us-001.md   # process one story and exit
+./hero watch                          # watch inbox/ continuously
+./hero run inbox/us-001.md            # process one story and exit
+./hero plan plan.md                   # decompose plan.md into inbox/<plan-name>/us-XXX.md + _manifest.yaml
+./hero run-plan <plan-name>           # walk the plan in DAG order
 ```
+
+### Multi-story plans
+
+For projects bigger than a single user story, `hero plan` calls the **Planner** role to break a high-level Markdown plan into a DAG of small stories (each fits one PEV round, with explicit `depends_on` edges and verifiable acceptance criteria), and `hero run-plan` walks that DAG with the Worker → Verifier → Reviewer pipeline. Stories whose ancestors fail are reported as `skipped` rather than dispatched.
 
 ## Configuration
 

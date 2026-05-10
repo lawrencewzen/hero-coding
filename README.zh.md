@@ -127,9 +127,15 @@ cp config.local.yaml.example config.local.yaml
 cp examples/stories/us-001.md inbox/
 
 # 4. 运行
-./hero watch                    # 持续监听 inbox/
-./hero run inbox/us-001.md      # 处理单个 story 后退出
+./hero watch                          # 持续监听 inbox/
+./hero run inbox/us-001.md            # 处理单个 story 后退出
+./hero plan plan.md                   # 把 plan.md 拆成 inbox/<plan-name>/us-XXX.md + _manifest.yaml
+./hero run-plan <plan-name>           # 按 DAG 顺序跑完一个 plan 下所有 story
 ```
+
+### 多 story 项目
+
+比单个 story 大的项目用 `hero plan` 调 **Planner** 角色把高层 Markdown plan 拆成一组 story (每个都对应一个 PEV round、有明确的 `depends_on` 依赖、有可验证的验收条件),再用 `hero run-plan` 按 DAG 顺序串起 Worker → Verifier → Reviewer 流水线。前置 story 失败时,下游 story 直接标 `skipped` 不再 dispatch。
 
 ## 配置
 
