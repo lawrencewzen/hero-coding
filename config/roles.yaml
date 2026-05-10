@@ -12,6 +12,10 @@ reviewer:
   provider: ring
   # reasoning_effort: xhigh   # Reviewer benefits from deeper reasoning when auditing the diff
 
+planner:
+  provider: ring
+  reasoning_effort: xhigh     # Planner shapes a high-level plan into a DAG of stories — high-difficulty reasoning
+
 # Where Hero Coding will run stories. Relative paths resolve against the
 # project root (where you run `hero` from).
 target_repo: examples/target-repo

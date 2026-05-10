@@ -85,6 +85,7 @@ type roleYAML struct {
 type rolesYAML struct {
 	Worker          roleYAML `yaml:"worker"`
 	Reviewer        roleYAML `yaml:"reviewer"`
+	Planner         roleYAML `yaml:"planner"`
 	TargetRepo      string   `yaml:"target_repo"`
 	TargetBaseRef   string   `yaml:"target_base_ref,omitempty"`
 	MaxRetries      *int     `yaml:"max_retries,omitempty"`
@@ -256,7 +257,7 @@ func loadRoles(path string) (map[string]RoleAssignment, TargetConfig, rolesYAML,
 		return nil, TargetConfig{}, rolesYAML{}, fmt.Errorf("parse %s: %w", path, err)
 	}
 	roles := map[string]RoleAssignment{}
-	for name, src := range map[string]roleYAML{"worker": r.Worker, "reviewer": r.Reviewer} {
+	for name, src := range map[string]roleYAML{"worker": r.Worker, "reviewer": r.Reviewer, "planner": r.Planner} {
 		if strings.TrimSpace(src.Provider) == "" {
 			return nil, TargetConfig{}, rolesYAML{}, fmt.Errorf("%s: %s.provider is required", path, name)
 		}

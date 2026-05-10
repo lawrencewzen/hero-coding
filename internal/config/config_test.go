@@ -42,6 +42,8 @@ worker:
   provider: ring
 reviewer:
   provider: ring
+planner:
+  provider: ring
 target_repo: ./repo
 `
 	secretsBoth = `
@@ -98,6 +100,8 @@ worker:
   reasoning_effort: xhigh
 reviewer:
   provider: ring
+planner:
+  provider: ring
 target_repo: /tmp
 `,
 		"config.local.yaml": secretsBoth,
@@ -135,6 +139,8 @@ worker:
   provider: ring
 reviewer:
   provider: gpt-5
+planner:
+  provider: ring
 target_repo: /tmp
 `,
 		"config.local.yaml": secretsBoth,
@@ -181,6 +187,8 @@ worker:
   provider: ring
 reviewer:
   provider: nonexistent
+planner:
+  provider: ring
 target_repo: /tmp
 `,
 		"config.local.yaml": secretsBoth,
@@ -232,6 +240,9 @@ worker:
 reviewer:
   provider: p
   model: explicit-model
+planner:
+  provider: p
+  model: explicit-model
 target_repo: /tmp
 `,
 		"config.local.yaml": "keys:\n  p: k\n",
@@ -280,6 +291,8 @@ func TestLoad_RuntimeOverrides(t *testing.T) {
 worker:
   provider: ring
 reviewer:
+  provider: ring
+planner:
   provider: ring
 target_repo: /tmp
 target_base_ref: develop
