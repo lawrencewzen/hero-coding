@@ -89,9 +89,15 @@ func NewLLMClient(cfg *config.LLMConfig) *LLMClient {
 }
 
 // ChatOptions adjusts a single Chat call. All fields are optional.
+//
+// ReasoningEffort overrides the per-client default from LLMConfig for this
+// one call. nil = inherit cfg default. Pointer-to-empty-string ("") = explicit
+// "send no reasoning_effort field" (rare, but lets a caller suppress the
+// default when the config has one set).
 type ChatOptions struct {
-	Temperature    *float64 // nil = provider default
-	ResponseFormat *string  // e.g. "json_object"; nil = unset
+	Temperature     *float64 // nil = provider default
+	ResponseFormat  *string  // e.g. "json_object"; nil = unset
+	ReasoningEffort *string  // nil = inherit cfg.ReasoningEffort
 }
 
 // Chat 调用 OpenAI chat completions（非流式），返回 assistant message
@@ -125,6 +131,9 @@ func (c *LLMClient) ChatWithOptions(ctx context.Context, msgs []ChatMessage, too
 	}
 	if opts.ResponseFormat != nil {
 		reqBody["response_format"] = map[string]any{"type": *opts.ResponseFormat}
+	}
+	if effort := resolveReasoningEffort(c.cfg, opts); effort != "" {
+		reqBody["reasoning_effort"] = effort
 	}
 
 	payload, err := json.Marshal(reqBody)
@@ -201,18 +210,17 @@ func (c *LLMClient) Stream(ctx context.Context, msgs []ChatMessage, tools []map[
 	// 使用不带超时的 streamClient（由 ctx 控制），避免流式场景超时
 	streamClient := c.streamClient
 
-	reqBody := struct {
-		Model         string           `json:"model"`
-		Messages      []ChatMessage    `json:"messages"`
-		Tools         []map[string]any `json:"tools,omitempty"`
-		Stream        bool             `json:"stream"`
-		StreamOptions *streamOptions   `json:"stream_options,omitempty"`
-	}{
-		Model:         c.cfg.Model,
-		Messages:      msgs,
-		Tools:         tools,
-		Stream:        true,
-		StreamOptions: &streamOptions{IncludeUsage: true},
+	reqBody := map[string]any{
+		"model":          c.cfg.Model,
+		"messages":       msgs,
+		"stream":         true,
+		"stream_options": &streamOptions{IncludeUsage: true},
+	}
+	if len(tools) > 0 {
+		reqBody["tools"] = tools
+	}
+	if effort := resolveReasoningEffort(c.cfg, ChatOptions{}); effort != "" {
+		reqBody["reasoning_effort"] = effort
 	}
 
 	payload, err := json.Marshal(reqBody)
@@ -458,6 +466,20 @@ type LLMUsage struct {
 
 type streamOptions struct {
 	IncludeUsage bool `json:"include_usage"`
+}
+
+// resolveReasoningEffort picks the value to send as `reasoning_effort`.
+// Per-call ChatOptions wins (including an explicit empty string, which
+// suppresses the cfg default); otherwise the per-client cfg default is used.
+// Returns "" when the field should be omitted from the request entirely.
+func resolveReasoningEffort(cfg *config.LLMConfig, opts ChatOptions) string {
+	if opts.ReasoningEffort != nil {
+		return *opts.ReasoningEffort
+	}
+	if cfg == nil {
+		return ""
+	}
+	return cfg.ReasoningEffort
 }
 
 func logLLMResponse(log *slog.Logger, model string, latency time.Duration, usage *LLMUsage, finishReason string, toolCallCount int) {
